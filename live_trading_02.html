@@ -1,0 +1,600 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Quantum Yield — Live Trading (HFT / IDT)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root{
+      --bg:#0e1116; --panel:#171b22; --muted:#8a94a7; --text:#e7ecf3; --accent:#57a6ff;
+      --buy:#34d399; --sell:#f87171; --border:#242a35; --track:#0f141b;
+      --ok:#22c55e; --err:#f87171; --warn:#f59e0b;
+
+      /* dashboard header height (pill row) */
+      --dash-header-h: 46px;
+    }
+
+    *{ box-sizing:border-box }
+
+    html, body{
+      height:100%;
+      margin:0;
+      background:var(--bg);
+      color:var(--text);
+      font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial,"Noto Sans",sans-serif;
+      width:100%;
+      overflow-x:hidden;
+    }
+
+    #root{
+      height:100svh;
+      width:100%;
+      display:grid;
+      grid-template-rows:auto minmax(0,1fr);
+    }
+
+    /* ================= Header ================= */
+    .hdr{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      padding:14px 16px 10px;
+      gap:12px;
+    }
+
+    .brand{display:flex;align-items:center;gap:10px}
+    .brand img{height:36px;border-radius:6px;box-shadow:0 2px 6px rgba(0,0,0,.25)}
+    h1{margin:0;font-size:18px;letter-spacing:.2px}
+
+    .status-pill{
+      padding:6px 10px;
+      border:1px solid var(--border);
+      border-radius:999px;
+      font-size:12px;
+      color:var(--muted);
+    }
+    .status-pill .dot{
+      display:inline-block;
+      width:7px;height:7px;border-radius:50%;
+      background:#475569;margin-right:6px;
+    }
+    .status-pill.live .dot{background:var(--ok)}
+    .status-pill.stop .dot{background:#ef4444}
+
+    /* ================= Main layout ================= */
+    .app{
+      height:100%;
+      min-height:0;
+      padding:0 16px 16px;
+      display:grid;
+      grid-template-columns:340px minmax(0,1fr);
+      gap:14px;
+      width:100%;
+    }
+
+    /* ================= Controls panel ================= */
+    .panel{
+      background:var(--panel);
+      border:1px solid var(--border);
+      border-radius:14px;
+      padding:14px;
+      min-height:0;
+      min-width:0;
+      display:flex;
+      flex-direction:column;
+
+      /* Align with first quad top border */
+      margin-top:var(--dash-header-h);
+    }
+
+    h2{
+      font-size:13px;
+      color:var(--muted);
+      letter-spacing:.3px;
+      text-transform:uppercase;
+      margin:0 0 10px;
+    }
+
+    .row{
+      display:flex;
+      gap:8px;
+      margin-bottom:10px;
+      align-items:center;
+    }
+
+    .row label{
+      font-size:13px;
+      color:var(--muted);
+      min-width:96px;
+    }
+
+    .row > *:last-child{ min-width:0; }
+
+    select, input[type="number"], input[type="text"]{
+      width:100%;
+      background:#0f1319;
+      color:var(--text);
+      border:1px solid var(--border);
+      border-radius:9px;
+      padding:8px 10px;
+      outline:none;
+    }
+
+    input[type="file"]{ width:100%; color:#cfe6ff }
+    input[type="range"]{ accent-color:var(--accent); width:100% }
+
+    .scroll{
+      flex: 1 1 auto;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      gap: 10px; /* optional spacing between top controls and log */
+    }
+
+    .ctrlTop{
+      flex: 1 1 0;
+      min-height: 0;
+      overflow: auto;
+      padding-right: 2px;
+    }
+
+    .btn{
+      background:#0f1319;
+      color:#e7ecf3;
+      border:1px solid #1f2631;
+      border-radius:8px;
+      padding:6px 10px;
+      cursor:pointer;
+    }
+    .btn.dim{opacity:.55;pointer-events:none}
+    .btn.active{border-color:var(--accent);box-shadow:0 0 0 2px rgba(87,166,255,.15) inset}
+
+    .panel { min-height: 0; }
+
+    /* FIXED log window height (scrolls internally) */
+    .log-spacer{
+      flex: 1 1 50%;
+      min-height: 0;
+    }
+
+    .console{
+      flex: 1 1 0;
+      min-height: 0;
+      overflow: auto;
+      background:#0f141b;
+      border:1px solid #1f2631;
+      border-radius:8px;
+      padding:8px;
+      font-family:ui-monospace, Menlo, Consolas, monospace;
+      font-size:12px;
+      color:#cfe6ff;
+      white-space: pre-wrap;
+    }
+
+    /* ================= Compact mode toggle ================= */
+    .seg{display:flex;gap:3px;flex-wrap:nowrap}
+    .seg label{
+      display:flex;
+      align-items:center;
+      gap:5px;
+      background:#0f1319;
+      border:1px solid #1f2631;
+      border-radius:9px;
+      padding:2px 5px;
+      font-size:11px;
+      line-height:1;
+      cursor:pointer;
+      white-space:nowrap;
+    }
+    .seg input{
+      appearance:none;
+      width:8px;height:8px;
+      border:1px solid #4b5563;
+      border-radius:50%;
+    }
+    .seg input:checked{background:var(--accent);border-color:var(--accent)}
+    .hide{display:none!important}
+
+    /* ================= Dashboard ================= */
+    .dash{
+      min-height:0;
+      display:grid;
+      grid-template-rows:auto minmax(0,1fr);
+      gap:10px;
+      padding-top:0; /* critical */
+    }
+
+    .dashTop{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      flex-wrap:wrap;
+      height:var(--dash-header-h);
+    }
+
+    .pill{
+      height:var(--dash-header-h);
+      box-sizing:border-box;
+
+      border:1px solid var(--border);
+      border-radius:999px;
+      padding:6px 10px;
+      font-size:12px;
+      color:#cfe6ff;
+      background:#0f1419;
+
+      display:flex;
+      align-items:center;        /* vertical center */
+      gap:10px;
+    }
+    .pill b{color:#fff;font-weight:600}
+
+    .dashGrid{
+      min-height:0;
+      display:grid;
+      grid-template-columns:1fr 1fr;
+      grid-template-rows:1fr 1fr;
+      gap:14px;
+    }
+    .dashGrid > .quad{
+      margin-top:-7px;
+    }
+    .quad{
+      min-height:0;
+      border:1px solid var(--border);
+      border-radius:14px;
+      background:#0f1419;
+      padding:10px;
+      display:flex;
+      flex-direction:column;
+      gap:8px;
+    }
+
+    .quadHdr{
+      min-height:36px;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      flex-wrap:nowrap;
+    }
+
+    .quadHdr h3{
+      margin:0;
+      font-size:12px;
+      color:#cfe6ff;
+    }
+
+    .quadTools{display:flex;gap:8px}
+
+    .miniSel{
+      background:#0b1016;
+      border:1px solid #1f2631;
+      border-radius:999px;
+      padding:4px 8px;
+      font-size:12px;
+      height:28px;
+      color:var(--text);
+    }
+
+    canvas{width:100%;height:100%;display:block}
+    .canvasWrap{
+      flex:1 1 0;
+      min-height:0;
+      border:1px solid #11161e;
+      border-radius:12px;
+      overflow:hidden;
+    }
+
+    .hint{font-size:12px;color:#9fb6d4}
+
+    /* Small helpers for new UI pieces */
+    .ctrl-row{
+      display:flex;
+      gap:8px;
+      margin-bottom:10px;
+      align-items:center;
+    }
+    .ctrl-row label{
+      font-size:13px;
+      color:var(--muted);
+      min-width:96px;
+    }
+    .ctrl-input{width:100%}
+
+    /* ================= Responsive ================= */
+    @media (max-width:1100px){
+      .app{grid-template-columns:1fr}
+      .panel{margin-top:0}
+      .dashTop{height:auto}
+      .dashGrid{
+        grid-template-columns:1fr;
+        grid-template-rows:repeat(4, minmax(220px, 1fr));
+      }
+    }
+
+    .qy-btn{
+      padding:6px 10px;border-radius:10px;border:1px solid rgba(173,186,204,.25);
+      background:rgba(18,24,34,.9);color:#d6deeb;cursor:pointer
+    }
+    .qy-btn:hover{filter:brightness(1.08)}
+    .hzMini{
+      margin-left:10px;
+      font:11px ui-monospace, Menlo, Consolas, monospace;
+      color:rgba(214,222,235,.85);
+      max-width:340px;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      display:inline-block;
+      vertical-align:middle;
+    }
+
+    /* ===================== MODAL (added) ===================== */
+    #predModal{
+      position:fixed;
+      inset:0;
+      background:rgba(0,0,0,.55);
+      z-index:9999;
+      display:none;
+      padding:18px;
+    }
+    #predModal.open{display:block}
+    .predCard{
+      max-width:920px;
+      margin:6vh auto;
+      background:var(--panel);
+      border:1px solid var(--border);
+      border-radius:16px;
+      overflow:hidden;
+      box-shadow:0 10px 30px rgba(0,0,0,.35);
+    }
+    .predHdr{
+      display:flex;
+      align-items:flex-start;
+      justify-content:space-between;
+      gap:12px;
+      padding:14px 14px 12px;
+      border-bottom:1px solid var(--border);
+    }
+    .predHdr .sub{
+      margin-top:4px;
+      font-size:12px;
+      color:var(--muted);
+    }
+    .predBody{
+      display:grid;
+      grid-template-columns:1fr 1fr;
+      gap:12px;
+      padding:14px;
+    }
+    .predColTitle{
+      font-size:12px;
+      color:#cfe6ff;
+      margin:0 0 8px;
+    }
+    .predList{
+      background:#0f141b;
+      border:1px solid #1f2631;
+      border-radius:12px;
+      padding:10px;
+      max-height:52vh;
+      overflow:auto;
+    }
+    .chkRow{
+      display:flex;
+      gap:10px;
+      align-items:center;
+      padding:6px 8px;
+      border-radius:10px;
+      cursor:pointer;
+      user-select:none;
+    }
+    .chkRow:hover{background:rgba(87,166,255,.08)}
+    .chkTxt{
+      font:12px ui-monospace, Menlo, Consolas, monospace;
+      color:#d6deeb;
+    }
+    .muted{font-size:12px;color:var(--muted);padding:6px 2px}
+    .predFtr{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      padding:12px 14px 14px;
+      border-top:1px solid var(--border);
+    }
+    .predBtn{
+      padding:8px 12px;
+      border-radius:12px;
+      border:1px solid rgba(173,186,204,.25);
+      background:rgba(18,24,34,.9);
+      color:#d6deeb;
+      cursor:pointer;
+    }
+    .predBtn.primary{
+      border-color:rgba(87,166,255,.55);
+      box-shadow:0 0 0 2px rgba(87,166,255,.12) inset;
+    }
+    /* ========================================================= */
+  </style>
+</head>
+
+<body>
+<div id="root">
+  <div class="hdr">
+    <div class="brand">
+      <a href="https://quantumyield.ai" target="_blank" rel="noopener">
+        <img src="https://quantumyield.ai/logo.jpg" alt="Quantum Yield Logo">
+      </a>
+      <h1>Quantum Yield — Live Trading (HFT / IDT)</h1>
+    </div>
+
+    <div id="connStatus" class="status-pill stop" role="status" aria-live="polite" aria-label="Connection status">
+      <span class="dot"></span><span class="txt">Offline</span>
+    </div>
+  </div>
+
+  <div class="app">
+    <!-- Controls -->
+    <div class="panel">
+      <h2>Controls</h2>
+      <div class="scroll">
+        <div class="ctrlTop">
+          <div class="row">
+            <label>Mode</label>
+            <div class="seg" id="modeSeg">
+              <label><input id="modeLive" type="radio" name="mode" value="live" checked> Live</label>
+            </div>
+          </div>
+
+          <div class="row">
+            <label>Refresh (ms)</label>
+            <input id="refreshMs" type="number" min="200" step="100" value="1000" disabled>
+            <button id="applyRefresh" class="btn dim" style="min-width:70px" type="button">Apply</button>
+          </div>
+
+          <h2 id="liveHdr">Live (Symbol)</h2>
+          <div id="liveInputs">
+            <!-- <div class="row">
+              <label>Base URL</label>
+              <input id="liveBase" type="text" placeholder="http://localhost:5050" value="http://localhost:5050" />
+            </div> -->
+
+            <div class="ctrl-row">
+              <label for="liveSymbol">Symbol</label>
+              <select id="liveSymbol" class="ctrl-input">
+                <option value="ES">ES</option>
+                <option value="ZN">ZN</option>
+              </select>
+            </div>
+
+            <!-- <div class="ctrl-row">
+              <label for="liveDate">Date</label>
+              <input id="liveDate" class="ctrl-input" type="text" placeholder="YYYYMMDD" autocomplete="off" />
+            </div> -->
+
+            <!-- <div class="row">
+              <label>Snapshot (sec)</label>
+              <input id="snapSeconds" type="number" min="1" max="120" step="1" value="120" />
+            </div> -->
+          </div>
+        </div>
+        <div id="statusBox" class="console" aria-live="polite">STATUS —</div>
+      </div>
+    </div>
+
+    <!-- Quadrants -->
+    <div class="dash">
+      <div class="dashTop">
+        <div class="pill">
+          <span>Symbol: <b id="pillSym">—</b></span>
+          <span>Date: <b id="pillDate">—</b></span>
+          <span>Rows: <b id="pillRows">—</b></span>
+          <span>L12: <b id="pillL12">—</b></span>
+        </div>
+
+        <div class="pill" id="predSelPill">
+          <span style="opacity:.85">Pred lines:</span>
+          <label style="display:flex;gap:6px;align-items:center"><input id="showHFT" type="checkbox" checked> HFT</label>
+          <label style="display:flex;gap:6px;align-items:center"><input id="showIDT" type="checkbox" checked> IDT</label>
+          <!-- <select id="predPick" class="miniSel" title="Pick horizons">
+            <option value="auto" selected>Auto</option>
+            <option value="short">Short</option>
+            <option value="mid">Mid</option>
+            <option value="long">Long</option>
+          </select> -->
+        </div>
+      </div>
+
+      <div class="dashGrid">
+        <!-- Q1: Price -->
+        <div class="quad">
+          <div class="quadHdr">
+            <h3>Price (Mid vs Microprice)</h3>
+            <div class="quadTools">
+              <span class="hint">Wheel=zoom · Drag=pan</span>
+            </div>
+          </div>
+          <div class="canvasWrap"><canvas id="qPrice"></canvas></div>
+        </div>
+
+        <!-- Q2: Predictions -->
+        <div class="quad">
+          <div class="quadHdr">
+            <h3>Predictions (bps)</h3>
+
+            <div class="quadTools">
+              <span class="hint">HFT solid · IDT dashed</span>
+              <button id="predCfgBtn" type="button" class="qy-btn">Select Horizons…</button>
+              <span id="predHint" class="hzMini" title="Selected horizons">—</span>
+            </div>
+          </div>
+
+          <div class="canvasWrap"><canvas id="qPred"></canvas></div>
+        </div>
+
+        <!-- Q3: L12 Microstructure -->
+        <div class="quad">
+          <div class="quadHdr">
+            <h3>Microstructure (Spread / OBI / Trades)</h3>
+            <div class="quadTools">
+              <span class="hint">Wheel=zoom · Drag=pan</span>
+            </div>
+          </div>
+          <div class="canvasWrap"><canvas id="qMicro"></canvas></div>
+        </div>
+
+        <!-- Q4: L12 Depth Snapshot -->
+        <div class="quad">
+          <div class="quadHdr">
+            <h3>Quote + Microstructure (Snapshot)</h3>
+            <div class="quadTools">
+              <span class="hint">Wheel=zoom · Drag=pan</span>
+            </div>
+          </div>
+          <div class="canvasWrap"><canvas id="qDepth"></canvas></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== MODAL MARKUP (added) ===================== -->
+<div id="predModal" aria-hidden="true">
+  <div class="predCard" role="dialog" aria-modal="true" aria-label="Select prediction horizons">
+    <div class="predHdr">
+      <div>
+        <div style="font-weight:700">Select Prediction Horizons</div>
+        <div class="sub">
+          HFT: <span id="predCountHFT">0</span> · IDT: <span id="predCountIDT">0</span>
+        </div>
+      </div>
+      <button id="predModalClose" class="qy-btn" type="button">✕</button>
+    </div>
+
+    <div class="predBody">
+      <div>
+        <div class="predColTitle">HFT Horizons</div>
+        <div id="predListHFT" class="predList"></div>
+      </div>
+      <div>
+        <div class="predColTitle">IDT Horizons</div>
+        <div id="predListIDT" class="predList"></div>
+      </div>
+    </div>
+
+    <div class="predFtr">
+      <button id="predModalReset" class="predBtn" type="button">Reset</button>
+      <div style="flex:1"></div>
+      <button id="predModalApply" class="predBtn primary" type="button">Apply</button>
+    </div>
+  </div>
+</div>
+<!-- =============================================================== -->
+
+<!-- keep path consistent with your static mount -->
+<script src="static/live_trading_02.js" defer></script>
+</body>
+</html>
