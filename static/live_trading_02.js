@@ -1,15 +1,13 @@
 "use strict";
 
 /* ============================================================================
-   Quantum Yield — Live Dashboard JS (FULL REVISED for Cloudflare Pages + Tunnel)
-   Key upgrades in this revision:
-   ✅ Smart baseURL() defaults:
-      - Local dev => http://localhost:5050
-      - Cloudflare Pages (https://live.quantumyield.ai) => https://api.quantumyield.ai
-      - Auto-upgrades http:// -> https:// when page is https
-   ✅ Better fetchJSON() error diagnostics (Cloudflare HTML errors, etc.)
-   ✅ Optional poll log throttling for STATUS box (keeps console full)
-   ✅ Everything else preserved from your prior FULL REVISED version
+   Quantum Yield — Live Dashboard JS (FULL REVISED, UTC-ANCHOR)
+   What changed vs your prior version:
+   ✅ ALL 4 charts use the SAME unified ms timeline (union of price + hft + idt)
+   ✅ Time labels are taken DIRECTLY from datasource epoch -> rendered in UTC (no Pacific conversion)
+   ✅ The “latest timestamp” is ALWAYS the right edge when AUTO_FOLLOW is true
+   ✅ Delta cursors (LAST.*_ms) are anchored to the LAST ROW timestamp (not a computed max key guess)
+   ✅ No-overlap polling preserved
    ============================================================================ */
 
 /* ---------------- DOM helpers ---------------- */
@@ -22,9 +20,8 @@ function logLine(tag, msg) {
 
   const box = $("statusBox");
   if (box) {
-    // Throttle noisy poll logs in the status box (console still gets everything)
     logLine._pollN = (logLine._pollN || 0) + 1;
-    const noisy = tag === "POLL" && logLine._pollN % 10 !== 0; // show 1/10 polls
+    const noisy = tag === "POLL" && logLine._pollN % 10 !== 0;
     if (!noisy) {
       if (!box.textContent || box.textContent.trim() === "STATUS —") box.textContent = "STATUS —";
       box.textContent += `\n${line}`;
@@ -46,22 +43,14 @@ function fmtInt(x) {
 /* ---------------- URL / fetch ---------------- */
 function baseURL() {
   const input = $("liveBase")?.value?.trim();
-
-  // Default:
-  // - Local file/localhost usage => localhost backend
-  // - Deployed on https://live.quantumyield.ai => https://api.quantumyield.ai
   if (!input) {
     const isLocal =
       location.hostname === "localhost" ||
       location.hostname === "127.0.0.1" ||
       location.hostname.endsWith(".local");
-
     return isLocal ? "http://localhost:5050" : "https://api.quantumyield.ai";
   }
-
   let v = input.replace(/\/+$/, "");
-
-  // Avoid mixed-content when the page is HTTPS
   if (location.protocol === "https:" && v.startsWith("http://")) {
     v = "https://" + v.slice("http://".length);
   }
@@ -96,39 +85,9 @@ async function fetchJSON(path, params = {}) {
   return res.json();
 }
 
-/* ---------------- Time helpers ---------------- */
-const DISPLAY_TZ = "America/Los_Angeles"; // Pacific display everywhere
-
-function ymdInTZ(tz = DISPLAY_TZ, d = new Date()) {
-  try {
-    const parts = new Intl.DateTimeFormat("en-CA", {
-      timeZone: tz,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    })
-      .formatToParts(d)
-      .reduce((a, p) => ((a[p.type] = p.value), a), {});
-    return `${parts.year}${parts.month}${parts.day}`;
-  } catch {
-    const y = d.getUTCFullYear();
-    const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-    const dd = String(d.getUTCDate()).padStart(2, "0");
-    return `${y}${m}${dd}`;
-  }
-}
-const TODAY_YMD = () => ymdInTZ(DISPLAY_TZ);
-
-function getSymbol() {
-  return ($("liveSymbol")?.value || "ES").toUpperCase();
-}
-function getLiveDate() {
-  const v = ($("liveDate")?.value || "").trim().replace(/[^\d]/g, "").slice(0, 8);
-  return v || TODAY_YMD();
-}
-
+/* ---------------- Time helpers (UTC ONLY) ---------------- */
 /**
- * Normalize epoch to milliseconds; auto-detect unit by magnitude:
+ * Normalize epoch to milliseconds; auto-detect by magnitude:
  * seconds, milliseconds, microseconds, nanoseconds.
  */
 function epochMsFromAny(v) {
@@ -136,55 +95,38 @@ function epochMsFromAny(v) {
   if (!Number.isFinite(x) || x <= 0) return NaN;
   if (x > 1e17) return Math.round(x / 1e6); // ns -> ms
   if (x > 1e14) return Math.round(x / 1e3); // us -> ms
-  if (x > 1e11) return Math.round(x); // ms -> ms
-  return Math.round(x * 1000); // s -> ms
+  if (x > 1e11) return Math.round(x);       // ms -> ms
+  return Math.round(x * 1000);              // s -> ms
 }
 
-/** Format time label in Pacific */
-const _fmtTimePST = (() => {
-  try {
-    return new Intl.DateTimeFormat("en-US", {
-      timeZone: DISPLAY_TZ,
-      hour12: false,
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    });
-  } catch {
-    return null;
-  }
-})();
-
-const _fmtDateTimePST = (() => {
-  try {
-    return new Intl.DateTimeFormat("en-CA", {
-      timeZone: DISPLAY_TZ,
-      hour12: false,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    });
-  } catch {
-    return null;
-  }
-})();
-
+/** UTC time label HH:MM:SS from ms */
 function timeLabelFromMs(ms) {
-  const d = new Date(ms);
-  if (_fmtTimePST) return _fmtTimePST.format(d);
-  // fallback: fixed -8h shift (no DST handling)
-  const shifted = new Date(ms - 8 * 3600 * 1000);
-  return shifted.toISOString().slice(11, 19);
+  if (!Number.isFinite(ms)) return "";
+  return new Date(ms).toISOString().slice(11, 19); // UTC
 }
 
+/** UTC date-time label YYYY-MM-DD HH:MM:SS from ms */
 function dateTimeLabelFromMs(ms) {
-  const d = new Date(ms);
-  if (_fmtDateTimePST) return _fmtDateTimePST.format(d).replace(",", "");
-  const shifted = new Date(ms - 8 * 3600 * 1000);
-  return shifted.toISOString().replace("T", " ").replace("Z", "");
+  if (!Number.isFinite(ms)) return "—";
+  return new Date(ms).toISOString().replace("T", " ").replace("Z", "");
+}
+
+/** Default date input as UTC YYYYMMDD (no local tz) */
+function ymdUTC(d = new Date()) {
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}${m}${dd}`;
+}
+const TODAY_YMD = () => ymdUTC();
+
+/* ---------------- Inputs ---------------- */
+function getSymbol() {
+  return ($("liveSymbol")?.value || "ES").toUpperCase();
+}
+function getLiveDate() {
+  const v = ($("liveDate")?.value || "").trim().replace(/[^\d]/g, "").slice(0, 8);
+  return v || TODAY_YMD();
 }
 
 /* Tooltip semantics for imbalance */
@@ -194,6 +136,10 @@ const IMBALANCE_HINT = [
   "-1 = all ask size (strong ask dominance)",
 ];
 
+/* ---------------- Behavior toggles ---------------- */
+const USE_DELTA = true;
+const MAX_ROWS_PER_STREAM = 3000;
+
 /* ---------------- State ---------------- */
 const STORE = {
   hft: { rows: [], horizons: [], unit: "", byMs: new Map() },
@@ -201,10 +147,17 @@ const STORE = {
   price: { rows: [], byMs: new Map() },
 };
 
+// Frontend-controlled "since_ms" markers — ONLY send what you already received.
+const LAST = { hft_ms: 0, idt_ms: 0, price_ms: 0 };
+
 const IDX = { value: 0 };
 let liveTimer = null;
 let playbackTimer = null;
 let POLL_MS = 1000;
+let pullInFlight = false;
+
+/* Auto-follow newest tick while live until user interacts */
+let AUTO_FOLLOW = true;
 
 /* ---------------- Horizon selection state ---------------- */
 const HSEL = { hftSelected: [], idtSelected: [] };
@@ -233,17 +186,14 @@ function labelForH(profile, h) {
 /* ---------------- Defaults ---------------- */
 const DEFAULT_HFT_MS = 250;
 const DEFAULT_IDT_MS = [3600, 1800, 1200].map((s) => s * 1000);
+const DEFAULT_VIEW_SPAN = 240; // how many points to show initially (right-anchored)
 
 function closestAvail(avail, target) {
   if (!avail || !avail.length) return null;
-  let best = avail[0],
-    bestD = Math.abs(avail[0] - target);
+  let best = avail[0], bestD = Math.abs(avail[0] - target);
   for (let i = 1; i < avail.length; i++) {
     const d = Math.abs(avail[i] - target);
-    if (d < bestD) {
-      best = avail[i];
-      bestD = d;
-    }
+    if (d < bestD) (best = avail[i]), (bestD = d);
   }
   return best;
 }
@@ -342,14 +292,14 @@ function buildPredModalLists() {
   if (!hAvail.length) {
     const p = document.createElement("div");
     p.className = "muted";
-    p.textContent = "No HFT horizons yet (wait for /pred/latest).";
+    p.textContent = "No HFT horizons yet (wait for /pred/latest or /pred/delta).";
     boxH.appendChild(p);
   } else for (const h of hAvail) boxH.appendChild(mk("hft", h));
 
   if (!iAvail.length) {
     const p = document.createElement("div");
     p.className = "muted";
-    p.textContent = "No IDT horizons yet (wait for /pred/latest).";
+    p.textContent = "No IDT horizons yet (wait for /pred/latest or /pred/delta).";
     boxI.appendChild(p);
   } else for (const h of iAvail) boxI.appendChild(mk("idt", h));
 
@@ -372,7 +322,6 @@ function readModalSelections() {
 
   clampSelectedToAvailable("hft");
   clampSelectedToAvailable("idt");
-
   updatePredHintText();
 }
 
@@ -399,7 +348,33 @@ function ensureBpsKeys(rows, horizons, unit) {
   return u || "";
 }
 
-/* ---------------- Ingest + build per-profile ms maps ---------------- */
+/* ---------------- Helpers: "truth" last-ms per stream ---------------- */
+function lastMsFromRows(rows) {
+  if (!rows || !rows.length) return 0;
+  const r = rows[rows.length - 1];
+  const ms = epochMsFromAny(r?.epoch_ns ?? r?.epoch_us ?? r?.epoch_ms ?? r?.epoch_s ?? r?.epoch);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function currentKnownLastMs(profile) {
+  if (profile === "price") return lastMsFromRows(STORE.price.rows);
+  return lastMsFromRows(STORE[profile]?.rows || []);
+}
+
+function clampSince(profile, since) {
+  const known = currentKnownLastMs(profile);
+  const orig = since;
+
+  if (!Number.isFinite(since) || since < 0) since = 0;
+  if (known > 0 && since > known) since = known;
+
+  if (orig !== since) {
+    logLine("DBG", `clampSince(${profile}): orig=${orig} known=${known} -> ${since}`);
+  }
+  return since;
+}
+
+/* ---------------- Ingest helpers ---------------- */
 function rebuildByMs(profile) {
   const rows = STORE[profile]?.rows || [];
   const m = new Map();
@@ -410,26 +385,41 @@ function rebuildByMs(profile) {
   STORE[profile].byMs = m;
 }
 
+function rebuildPriceByMs() {
+  const rows = STORE.price?.rows || [];
+  const m = new Map();
+  for (const r of rows) {
+    const ms = epochMsFromAny(r?.epoch_ns ?? r?.epoch_us ?? r?.epoch_ms ?? r?.epoch_s ?? r?.epoch);
+    if (Number.isFinite(ms) && ms > 0) m.set(ms, r);
+  }
+  STORE.price.byMs = m;
+}
+
+function inferHorizonsFromRows(rows) {
+  const set = new Set();
+  for (let i = 0; i < Math.min(30, rows.length); i++) {
+    for (const k of Object.keys(rows[i] || {})) {
+      const m =
+        k.match(/^pred_(?:bps|dec)_(\d+)$/i) ||
+        k.match(/^pred_bps_(\d+)$/i) ||
+        k.match(/^pred_dec_(\d+)$/i);
+      if (m) set.add(+m[1]);
+    }
+  }
+  return Array.from(set).sort((a, b) => a - b);
+}
+
+/* Full replace (used for /pred/latest) */
 function ingestPred(profile, payload, symbol) {
-  if (!payload || !Array.isArray(payload.rows) || payload.rows.length === 0) {
+  const rows = Array.isArray(payload?.rows) ? payload.rows.slice() : [];
+  if (!rows.length) {
     STORE[profile] = { rows: [], horizons: [], unit: "", byMs: new Map() };
     logLine("SNAP", `ingestPred(${profile}): empty`);
     return;
   }
 
-  const rows = payload.rows.slice();
   let horizons = Array.isArray(payload.horizons) ? payload.horizons.slice() : [];
-
-  if (!horizons.length) {
-    const set = new Set();
-    for (let i = 0; i < Math.min(20, rows.length); i++) {
-      for (const k of Object.keys(rows[i] || {})) {
-        const m = k.match(/^pred_(?:bps|dec)_(\d+)$/i) || k.match(/^pred_bps_(\d+)$/i) || k.match(/^pred_dec_(\d+)$/i);
-        if (m) set.add(+m[1]);
-      }
-    }
-    horizons = Array.from(set).sort((a, b) => a - b);
-  }
+  if (!horizons.length) horizons = inferHorizonsFromRows(rows);
 
   const unit = ensureBpsKeys(rows, horizons, payload.unit);
   STORE[profile].rows = rows;
@@ -438,44 +428,158 @@ function ingestPred(profile, payload, symbol) {
 
   rebuildByMs(profile);
 
+  // IMPORTANT: cursor follows LAST ROW timestamp
+  const lastMs = lastMsFromRows(rows);
+  if (lastMs > 0) LAST[`${profile}_ms`] = lastMs;
+
   $("pillSym") && ($("pillSym").textContent = symbol || "—");
-  $("pillRows") && ($("pillRows").textContent = String(Math.max(STORE.hft.rows.length, STORE.idt.rows.length, STORE.price.rows.length)));
+  $("pillRows") &&
+    ($("pillRows").textContent = String(Math.max(STORE.hft.rows.length, STORE.idt.rows.length, STORE.price.rows.length)));
   $("pillL12") && ($("pillL12").textContent = "L1");
 
   clampSelectedToAvailable(profile);
   ensureDefaultPredSelection();
   updatePredHintText();
 
-  logLine("SNAP", `pred(${profile}): rows=${rows.length}, horizons=[${horizons.join(", ")}], unit=${unit || "?"}`);
+  logLine(
+    "SNAP",
+    `pred(${profile}): rows=${rows.length}, horizons=[${horizons.join(", ")}], unit=${unit || "?"} (LAST.${profile}_ms=${LAST[`${profile}_ms`]})`
+  );
 }
 
+/* Delta merge (used for /pred/delta) */
+function ingestPredDelta(profile, payload, symbol) {
+  const newRows = Array.isArray(payload?.rows) ? payload.rows : [];
+  const payloadMax = Number(payload?.max_epoch_ms);
+  const hasPayloadMax = Number.isFinite(payloadMax) && payloadMax > 0;
+
+  if (!newRows.length) {
+    if (hasPayloadMax) LAST[`${profile}_ms`] = Math.max(LAST[`${profile}_ms`], payloadMax);
+    return 0;
+  }
+
+  let horizons = Array.isArray(payload.horizons) ? payload.horizons.slice() : [];
+  if (!horizons.length) horizons = inferHorizonsFromRows(newRows);
+
+  const mergedHorizons = uniqSorted([...(STORE[profile].horizons || []), ...(horizons || [])]);
+  const unit = ensureBpsKeys(newRows, mergedHorizons, payload.unit || STORE[profile].unit);
+
+  let added = 0;
+  let localMax = 0;
+
+  for (const r of newRows) {
+    const ms = epochMsFromAny(r?.epoch_ns ?? r?.epoch_us ?? r?.epoch_ms ?? r?.epoch_s ?? r?.epoch);
+    if (!Number.isFinite(ms) || ms <= 0) continue;
+    STORE[profile].byMs.set(ms, r);
+    localMax = Math.max(localMax, ms);
+    added++;
+  }
+
+  if (added) {
+    const keys = Array.from(STORE[profile].byMs.keys()).sort((a, b) => a - b);
+    const keep = keys.slice(-MAX_ROWS_PER_STREAM);
+
+    const m2 = new Map();
+    const rows2 = [];
+    for (const k of keep) {
+      const rr = STORE[profile].byMs.get(k);
+      if (rr) {
+        if (rr.epoch == null) rr.epoch = k;
+        rows2.push(rr);
+        m2.set(k, rr);
+      }
+    }
+    STORE[profile].rows = rows2;
+    STORE[profile].byMs = m2;
+    STORE[profile].horizons = mergedHorizons;
+    STORE[profile].unit = unit || STORE[profile].unit;
+
+    const lastMs = lastMsFromRows(rows2);
+    const newCursor = hasPayloadMax ? payloadMax : Math.max(localMax, lastMs);
+    if (newCursor > 0) LAST[`${profile}_ms`] = Math.max(LAST[`${profile}_ms`], newCursor);
+
+    $("pillSym") && ($("pillSym").textContent = symbol || "—");
+    $("pillRows") &&
+      ($("pillRows").textContent = String(Math.max(STORE.hft.rows.length, STORE.idt.rows.length, STORE.price.rows.length)));
+    $("pillL12") && ($("pillL12").textContent = "L1");
+
+    clampSelectedToAvailable(profile);
+    ensureDefaultPredSelection();
+    updatePredHintText();
+  } else {
+    if (hasPayloadMax) LAST[`${profile}_ms`] = Math.max(LAST[`${profile}_ms`], payloadMax);
+  }
+
+  return added;
+}
+
+/* Snapshot full replace (used for /snapshot) */
 function ingestSnapshot(payload) {
   const rows = Array.isArray(payload?.rows) ? payload.rows : [];
   STORE.price.rows = rows;
+  rebuildPriceByMs();
 
-  const m = new Map();
-  for (const r of rows) {
-    const ms = epochMsFromAny(r?.epoch_ns ?? r?.epoch_us ?? r?.epoch_ms ?? r?.epoch_s ?? r?.epoch);
-    if (Number.isFinite(ms) && ms > 0) m.set(ms, r);
+  // IMPORTANT: cursor follows LAST ROW timestamp
+  const lastMs = lastMsFromRows(rows);
+  if (lastMs > 0) LAST.price_ms = lastMs;
+
+  logLine("SNAP", `snapshot: rows=${rows.length} (LAST.price_ms=${LAST.price_ms})`);
+}
+
+/* Snapshot delta merge (used for /snapshot/delta) */
+function ingestSnapshotDelta(payload) {
+  const newRows = Array.isArray(payload?.rows) ? payload.rows : [];
+  const payloadMax = Number(payload?.max_epoch_ms);
+  const hasPayloadMax = Number.isFinite(payloadMax) && payloadMax > 0;
+
+  if (!newRows.length) {
+    if (hasPayloadMax) LAST.price_ms = Math.max(LAST.price_ms, payloadMax);
+    return 0;
   }
-  STORE.price.byMs = m;
 
-  logLine("SNAP", `snapshot: rows=${rows.length}`);
+  let added = 0;
+  let localMax = 0;
+
+  for (const r of newRows) {
+    const ms = epochMsFromAny(r?.epoch_ns ?? r?.epoch_us ?? r?.epoch_ms ?? r?.epoch_s ?? r?.epoch);
+    if (!Number.isFinite(ms) || ms <= 0) continue;
+    STORE.price.byMs.set(ms, r);
+    localMax = Math.max(localMax, ms);
+    added++;
+  }
+
+  if (added) {
+    const keys = Array.from(STORE.price.byMs.keys()).sort((a, b) => a - b);
+    const keep = keys.slice(-MAX_ROWS_PER_STREAM);
+
+    const m2 = new Map();
+    const rows2 = [];
+    for (const k of keep) {
+      const rr = STORE.price.byMs.get(k);
+      if (rr) {
+        if (rr.epoch == null) rr.epoch = k;
+        rows2.push(rr);
+        m2.set(k, rr);
+      }
+    }
+    STORE.price.rows = rows2;
+    STORE.price.byMs = m2;
+
+    const lastMs = lastMsFromRows(rows2);
+    const newCursor = hasPayloadMax ? payloadMax : Math.max(localMax, lastMs);
+    if (newCursor > 0) LAST.price_ms = Math.max(LAST.price_ms, newCursor);
+  } else {
+    if (hasPayloadMax) LAST.price_ms = Math.max(LAST.price_ms, payloadMax);
+  }
+
+  return added;
 }
 
 /* ---------------- API calls ---------------- */
 async function fetchPredLatest(symbol, profile, n = 2000) {
   const data = await fetchJSON("/pred/latest", { symbol, profile, n });
   const rows = Array.isArray(data.rows) ? data.rows : [];
-
-  const set = new Set();
-  for (let i = 0; i < Math.min(rows.length, 20); i++) {
-    for (const k of Object.keys(rows[i] || {})) {
-      const m = k.match(/^pred_(?:bps|dec)_(\d+)$/i) || k.match(/^pred_bps_(\d+)$/i) || k.match(/^pred_dec_(\d+)$/i);
-      if (m) set.add(+m[1]);
-    }
-  }
-  const horizons = Array.from(set).sort((a, b) => a - b);
+  const horizons = Array.isArray(data.horizons) && data.horizons.length ? data.horizons : inferHorizonsFromRows(rows);
   return { rows, horizons, unit: data.unit || "" };
 }
 
@@ -484,7 +588,14 @@ async function fetchSnapshot(symbol, seconds = 120) {
   return fetchJSON("/snapshot", { symbol, seconds: s, profile: "hft" });
 }
 
-/* ---------------- Unified timeline ---------------- */
+async function fetchPredDelta(symbol, profile, since_ms) {
+  return fetchJSON("/pred/delta", { symbol, profile, since_ms: Math.max(0, Number(since_ms) || 0) });
+}
+async function fetchSnapshotDelta(symbol, since_ms) {
+  return fetchJSON("/snapshot/delta", { symbol, since_ms: Math.max(0, Number(since_ms) || 0) });
+}
+
+/* ---------------- Unified timeline (single source of truth for x-axis) ---------------- */
 function buildTimelineIndex() {
   const msSet = new Set();
   for (const ms of STORE.price.byMs.keys()) msSet.add(ms);
@@ -550,7 +661,7 @@ function updateTimeLabel() {
   const idx = Math.max(0, Math.min(IDX.value, Math.max(0, N - 1)));
   const ms = msArr[idx];
   const ts = Number.isFinite(ms) ? dateTimeLabelFromMs(ms) : "—";
-  el.textContent = `t = ${N ? idx + 1 : 0} / ${N}  ·  ${ts}`;
+  el.textContent = `t = ${N ? idx + 1 : 0} / ${N}  ·  ${ts} UTC`;
 }
 
 function stopPlayback() {
@@ -562,6 +673,7 @@ function stopPlayback() {
 
 function startPlayback() {
   stopPlayback();
+  AUTO_FOLLOW = false;
   const speed = Number($("speedSel")?.value || "1") || 1;
   if ($("playBtn")) $("playBtn").textContent = "Pause";
 
@@ -570,7 +682,7 @@ function startPlayback() {
     if (!N) return;
     IDX.value = Math.min(N - 1, IDX.value + Math.max(1, speed));
     $("timeSlider") && ($("timeSlider").value = String(IDX.value));
-    renderAll();
+    renderAll(false);
     if (IDX.value >= N - 1) stopPlayback();
   }, 200);
 
@@ -582,14 +694,22 @@ function togglePlayback() {
 }
 
 /* ---------------- View helpers ---------------- */
-function ensureViewsInitialized() {
+function snapViewToRight(view, N, span = DEFAULT_VIEW_SPAN) {
+  if (!N) return;
+  const i1 = N - 1;
+  const i0 = Math.max(0, i1 - Math.max(20, span));
+  view.i0 = i0;
+  view.i1 = i1;
+}
+
+function ensureViewsInitialized(forceRight = false) {
   const { N } = buildTimelineIndex();
   if (!N) return;
 
   const init = (view) => {
-    if (view.i1 <= view.i0 || view.i1 <= 0) {
-      view.i0 = 0;
-      view.i1 = N - 1;
+    const uninit = view.i1 <= view.i0 || view.i1 <= 0;
+    if (uninit || forceRight) {
+      snapViewToRight(view, N, DEFAULT_VIEW_SPAN);
     } else {
       view.i0 = Math.max(0, Math.min(view.i0, N - 2));
       view.i1 = Math.max(view.i0 + 1, Math.min(view.i1, N - 1));
@@ -661,8 +781,7 @@ function drawAxes(ctx, W, H, pad) {
 }
 
 function drawTicksY(ctx, pad, W, H, minV, maxV, fmtFn) {
-  const y0 = pad.t,
-    y1 = H - pad.b;
+  const y0 = pad.t, y1 = H - pad.b;
   const AX = "rgba(173,186,204,0.65)";
   const LAB = "rgba(159,182,212,0.9)";
   ctx.save();
@@ -692,8 +811,7 @@ function drawTicksXTime(ctx, pad, W, H, msArr, i0, i1) {
   ctx.textAlign = "center";
   ctx.textBaseline = "top";
   const step = Math.max(1, Math.floor((i1 - i0) / 6));
-  const x0 = pad.l,
-    x1 = W - pad.r;
+  const x0 = pad.l, x1 = W - pad.r;
   const y = H - pad.b + 4;
   for (let i = i0; i <= i1; i += step) {
     const x = x0 + ((i - i0) / Math.max(1, i1 - i0)) * (x1 - x0);
@@ -736,8 +854,7 @@ function drawLine(ctx, xs, ys, strokeStyle, dash = null, width = 1.5) {
   let started = false;
   ctx.beginPath();
   for (let i = 0; i < xs.length; i++) {
-    const x = xs[i],
-      y = ys[i];
+    const x = xs[i], y = ys[i];
     if (!Number.isFinite(x) || !Number.isFinite(y)) {
       started = false;
       continue;
@@ -751,16 +868,11 @@ function drawLine(ctx, xs, ys, strokeStyle, dash = null, width = 1.5) {
   ctx.restore();
 }
 
-/**
- * Hover tooltip:
- * extraText: array of strings appended under normal lines (used for imbalance legend)
- */
 function drawHover(ctx, pad, W, H, xs, hoverK, lines, extraText = []) {
   if (!xs || hoverK < 0 || hoverK >= xs.length) return;
 
   const x = xs[hoverK];
-  const y0 = pad.t,
-    y1 = H - pad.b;
+  const y0 = pad.t, y1 = H - pad.b;
 
   ctx.save();
   ctx.strokeStyle = "rgba(173,186,204,0.55)";
@@ -851,8 +963,7 @@ function renderPrice(view) {
   const mids = new Array(span + 1);
   const micros = new Array(span + 1);
 
-  let lastMid = NaN,
-    lastMp = NaN;
+  let lastMid = NaN, lastMp = NaN;
 
   for (let k = 0; k <= span; k++) {
     const ms = msArr[i0 + k];
@@ -867,21 +978,17 @@ function renderPrice(view) {
     micros[k] = Number.isFinite(mp) ? mp : lastMp;
   }
 
-  let min = +Infinity,
-    max = -Infinity;
+  let min = +Infinity, max = -Infinity;
   for (const v of mids) if (Number.isFinite(v)) (min = Math.min(min, v), (max = Math.max(max, v)));
   const hasMicro = micros.some(Number.isFinite);
   if (hasMicro) for (const v of micros) if (Number.isFinite(v)) (min = Math.min(min, v), (max = Math.max(max, v)));
 
   if (!Number.isFinite(min) || min === max) {
-    min = 0;
-    max = 1;
+    min = 0; max = 1;
   }
 
-  const x0 = pad.l,
-    x1 = W - pad.r;
-  const y0 = pad.t,
-    y1 = H - pad.b;
+  const x0 = pad.l, x1 = W - pad.r;
+  const y0 = pad.t, y1 = H - pad.b;
 
   const xs = new Array(span + 1);
   const yMid = new Array(span + 1);
@@ -948,8 +1055,20 @@ function renderPred(view) {
   const hftSel = uniqSorted(HSEL.hftSelected);
   const idtSel = uniqSorted(HSEL.idtSelected);
 
-  const HFT_COLS = ["rgba(245,158,11,0.95)", "rgba(239,68,68,0.95)", "rgba(168,85,247,0.95)", "rgba(34,197,94,0.95)", "rgba(251,191,36,0.95)"];
-  const IDT_COLS = ["rgba(125,211,252,0.95)", "rgba(59,130,246,0.95)", "rgba(16,185,129,0.95)", "rgba(99,102,241,0.95)", "rgba(14,165,233,0.95)"];
+  const HFT_COLS = [
+    "rgba(245,158,11,0.95)",
+    "rgba(239,68,68,0.95)",
+    "rgba(168,85,247,0.95)",
+    "rgba(34,197,94,0.95)",
+    "rgba(251,191,36,0.95)",
+  ];
+  const IDT_COLS = [
+    "rgba(125,211,252,0.95)",
+    "rgba(59,130,246,0.95)",
+    "rgba(16,185,129,0.95)",
+    "rgba(99,102,241,0.95)",
+    "rgba(14,165,233,0.95)",
+  ];
 
   const selLines = [];
 
@@ -979,8 +1098,7 @@ function renderPred(view) {
     }
   }
 
-  let min = +Infinity,
-    max = -Infinity;
+  let min = +Infinity, max = -Infinity;
   for (const L of selLines) {
     for (let i = i0; i <= i1; i++) {
       const v = L.getVal(msArr[i]);
@@ -990,17 +1108,14 @@ function renderPred(view) {
     }
   }
   if (!Number.isFinite(min) || min === max) {
-    min = -1;
-    max = 1;
+    min = -1; max = 1;
   }
 
   drawTicksY(ctx, pad, W, H, min, max, (v) => fmtNum(v, 2));
   drawTicksXTime(ctx, pad, W, H, msArr, i0, i1);
 
-  const x0 = pad.l,
-    x1 = W - pad.r;
-  const y0 = pad.t,
-    y1 = H - pad.b;
+  const x0 = pad.l, x1 = W - pad.r;
+  const y0 = pad.t, y1 = H - pad.b;
   const span = Math.max(1, i1 - i0);
 
   const xs = new Array(span + 1);
@@ -1068,21 +1183,17 @@ function renderMicro(view) {
     vals[k] = Number.isFinite(v) ? v : last;
   }
 
-  let min = +Infinity,
-    max = -Infinity;
+  let min = +Infinity, max = -Infinity;
   for (const v of vals) if (Number.isFinite(v)) (min = Math.min(min, v), (max = Math.max(max, v)));
   if (!Number.isFinite(min) || min === max) {
-    min = -0.01;
-    max = 0.01;
+    min = -0.01; max = 0.01;
   }
 
   drawTicksY(ctx, pad, W, H, min, max, (v) => fmtNum(v, 6));
   drawTicksXTime(ctx, pad, W, H, msArr, i0, i1);
 
-  const x0 = pad.l,
-    x1 = W - pad.r;
-  const y0 = pad.t,
-    y1 = H - pad.b;
+  const x0 = pad.l, x1 = W - pad.r;
+  const y0 = pad.t, y1 = H - pad.b;
 
   const xs = new Array(span + 1);
   const ys = new Array(span + 1);
@@ -1096,7 +1207,7 @@ function renderMicro(view) {
   drawLine(ctx, xs, ys, col, null, 1.6);
 
   const hoverIdx = view.hoverIdx;
-  const hoverK = hoverIdx >= i0 && hoverIdx <= i1 ? view.hoverIdx - i0 : -1;
+  const hoverK = hoverIdx >= i0 && hoverIdx <= i1 ? hoverIdx - i0 : -1;
   if (hoverK >= 0) {
     drawHover(ctx, pad, W, H, xs, hoverK, [
       { label: "micro-mid", valueStr: Number.isFinite(vals[hoverK]) ? fmtNum(vals[hoverK], 6) : "—", colorStroke: col },
@@ -1105,8 +1216,8 @@ function renderMicro(view) {
 }
 
 /* ===================== Q4: Snapshot + Microstructure ===================== */
+/* --- bar helpers + depth chart (same logic, but time labels are UTC) --- */
 
-/* --- ORIGINAL (unsigned) mini bar retained for spread, etc. --- */
 function drawMiniBar(ctx, x, y, w, h, label, val, vmin, vmax, posCol, negCol, labelBelowGap = 6) {
   ctx.save();
   ctx.fillStyle = "rgba(173,186,204,0.18)";
@@ -1138,15 +1249,11 @@ function drawMiniBar(ctx, x, y, w, h, label, val, vmin, vmax, posCol, negCol, la
   ctx.restore();
 }
 
-/* --- NEW: signed mini bar (fills around 0) for imbalance --- */
 function drawMiniBarSigned(ctx, x, y, w, h, label, val, vmin, vmax, posCol, negCol, labelBelowGap = 6) {
   ctx.save();
-
-  // background
   ctx.fillStyle = "rgba(173,186,204,0.18)";
   ctx.fillRect(x, y, w, h);
 
-  // center marker if range crosses zero
   const crossesZero = Number.isFinite(vmin) && Number.isFinite(vmax) && vmin < 0 && vmax > 0;
   const xZero = crossesZero ? x + ((0 - vmin) / (vmax - vmin)) * w : x;
 
@@ -1175,7 +1282,6 @@ function drawMiniBarSigned(ctx, x, y, w, h, label, val, vmin, vmax, posCol, negC
         ctx.fillRect(xVal, y, ww, h);
       }
     } else {
-      // fallback: left-to-right
       const t = (clamped - vmin) / (vmax - vmin);
       const fillW = Math.max(0, Math.min(1, t)) * w;
       ctx.fillStyle = clamped >= 0 ? posCol : negCol;
@@ -1183,11 +1289,9 @@ function drawMiniBarSigned(ctx, x, y, w, h, label, val, vmin, vmax, posCol, negC
     }
   }
 
-  // border
   ctx.strokeStyle = "rgba(173,186,204,0.25)";
   ctx.strokeRect(x, y, w, h);
 
-  // label + value
   ctx.fillStyle = "rgba(159,182,212,0.85)";
   ctx.font = "11px ui-monospace, Menlo, Consolas, monospace";
   ctx.textAlign = "left";
@@ -1265,7 +1369,6 @@ function drawBottomTimeTicks(ctx, x0, x1, y, msArr, i0, i1) {
   ctx.restore();
 }
 
-/* NEW helper: make NaN-masked series by sign (for consistent coloring) */
 function splitBySign(vals, mapToY, positive = true) {
   return (vals || []).map((v) => {
     if (!Number.isFinite(v)) return NaN;
@@ -1297,36 +1400,32 @@ function renderDepth(view) {
 
   function getBidAskPxAny(r) {
     if (!r) return { b: NaN, a: NaN };
-    const b = num(r.bid_px1 ?? r.bid_px ?? r.best_bid_px ?? r.bid ?? r.bb_px);
-    const a = num(r.ask_px1 ?? r.ask_px ?? r.best_ask_px ?? r.ask ?? r.ba_px);
+    const b = num(r.bid_px1 ?? r.bid_px ?? r.best_bid_px ?? r.bid ?? r.bb_px ?? r.bid_px_00);
+    const a = num(r.ask_px1 ?? r.ask_px ?? r.best_ask_px ?? r.ask ?? r.ba_px ?? r.ask_px_00);
     return { b, a };
   }
 
   function getBidAskSzAny(r) {
     if (!r) return { bs: NaN, as: NaN };
-    const bs = num(r.bid_sz1 ?? r.bid_sz ?? r.best_bid_sz ?? r.bid_size ?? r.bb_sz);
-    const as = num(r.ask_sz1 ?? r.ask_sz ?? r.best_ask_sz ?? r.ask_size ?? r.ba_sz);
+    const bs = num(r.bid_sz1 ?? r.bid_sz ?? r.best_bid_sz ?? r.bid_size ?? r.bb_sz ?? r.bid_sz_00 ?? r.depth_bid);
+    const as = num(r.ask_sz1 ?? r.ask_sz ?? r.best_ask_sz ?? r.ask_size ?? r.ba_sz ?? r.ask_sz_00 ?? r.depth_ask);
     return { bs, as };
   }
 
-  // spread = ask - bid (always >= 0 if both exist)
   function spreadFromRow(r) {
     const { b, a } = getBidAskPxAny(r);
     if (Number.isFinite(b) && Number.isFinite(a)) return a - b;
-    // fallback if only mid/micro are known:
     const mid = midFromRow(r);
     const mp = microFromRow(r);
     if (Number.isFinite(mid) && Number.isFinite(mp)) return 2 * Math.abs(mp - mid);
     return NaN;
   }
 
-  // imbalance = (bid_sz - ask_sz) / (bid_sz + ask_sz) in [-1, +1]
   function imbalanceFromRow(r) {
     const { bs, as } = getBidAskSzAny(r);
     const d = bs + as || 0;
     if (d > 0) return (bs - as) / d;
 
-    // fallback to micro-mid signal; scale by spread to keep within [-1,1]
     const mid = midFromRow(r);
     const mp = microFromRow(r);
     const sp = spreadFromRow(r);
@@ -1360,7 +1459,6 @@ function renderDepth(view) {
 
   const r = findNearestRowWithAnySignal(idx, 800);
 
-  // ---- top text / bars layout
   const TEXT_TOP = 10;
   const TEXT_LINE = 16;
   const BAR_H = 8;
@@ -1379,7 +1477,7 @@ function renderDepth(view) {
   const msSnap = epochMsFromAny(r?.epoch_ns ?? r?.epoch_ms ?? r?.epoch_us ?? r?.epoch_s ?? r?.epoch) || msArr[idx];
   const tsSnap = Number.isFinite(msSnap) ? dateTimeLabelFromMs(msSnap) : "—";
   ctx.fillStyle = "rgba(159,182,212,0.8)";
-  ctx.fillText(tsSnap, 12, y);
+  ctx.fillText(`${tsSnap} UTC`, 12, y);
   y += TEXT_LINE;
 
   const { b: bpx, a: apx } = getBidAskPxAny(r);
@@ -1395,7 +1493,11 @@ function renderDepth(view) {
 
   const mid = midFromRow(r);
   const mp = microFromRow(r);
-  ctx.fillText(`mid: ${Number.isFinite(mid) ? fmtNum(mid, 2) : "—"}   micro: ${Number.isFinite(mp) ? fmtNum(mp, 2) : "—"}`, 12, y);
+  ctx.fillText(
+    `mid: ${Number.isFinite(mid) ? fmtNum(mid, 2) : "—"}   micro: ${Number.isFinite(mp) ? fmtNum(mp, 2) : "—"}`,
+    12,
+    y
+  );
   y += TEXT_LINE + 10;
 
   const barX = 12;
@@ -1407,10 +1509,8 @@ function renderDepth(view) {
   const ROW_H = BAR_H + LABEL_GAP + BAR_GAP;
   const BAR_Y0 = y;
 
-  // Signed bar for imbalance (fills around 0)
   drawMiniBarSigned(ctx, barX, BAR_Y0, barW, BAR_H, "imbalance", imbSnap, -1, 1, "rgba(52,211,153,0.9)", "rgba(248,113,113,0.9)", LABEL_GAP);
 
-  // Spread stays unsigned
   drawMiniBar(
     ctx,
     barX,
@@ -1426,7 +1526,6 @@ function renderDepth(view) {
     LABEL_GAP
   );
 
-  // ---- bottom mini chart (spread vs imbalance)
   const chartTop = BAR_Y0 + ROW_H * 2 + GAP_BEFORE_CHART;
   const chartBottom = H - 28;
 
@@ -1471,13 +1570,11 @@ function renderDepth(view) {
     sMax = 0.5;
   }
 
-  const iMin = -1,
-    iMax = 1;
+  const iMin = -1, iMax = 1;
 
   for (let k = 0; k <= span; k++) xs[k] = x0 + (k / span) * (x1 - x0);
 
   const ysS = sArr.map((v) => (Number.isFinite(v) ? y1 - ((v - sMin) / (sMax - sMin)) * (y1 - y0) : NaN));
-
   const mapI = (v) => y1 - ((v - iMin) / (iMax - iMin)) * (y1 - y0);
   const ysIpos = splitBySign(iArr, mapI, true);
   const ysIneg = splitBySign(iArr, mapI, false);
@@ -1517,7 +1614,11 @@ function renderDepth(view) {
       hoverK,
       [
         { label: "spread", valueStr: Number.isFinite(sArr[hoverK]) ? fmtNum(sArr[hoverK], 4) : "—", colorStroke: spreadCol },
-        { label: "imbalance", valueStr: Number.isFinite(iArr[hoverK]) ? fmtNum(iArr[hoverK], 3) : "—", colorStroke: Number(iArr[hoverK]) >= 0 ? imbPosCol : imbNegCol },
+        {
+          label: "imbalance",
+          valueStr: Number.isFinite(iArr[hoverK]) ? fmtNum(iArr[hoverK], 3) : "—",
+          colorStroke: Number(iArr[hoverK]) >= 0 ? imbPosCol : imbNegCol,
+        },
       ],
       IMBALANCE_HINT
     );
@@ -1525,8 +1626,8 @@ function renderDepth(view) {
 }
 
 /* ---------------- Master render ---------------- */
-function renderAll() {
-  ensureViewsInitialized();
+function renderAll(forceRight = false) {
+  ensureViewsInitialized(forceRight);
   setupSlider();
   updateTimeLabel();
   $("pillDate") && ($("pillDate").textContent = getLiveDate());
@@ -1537,11 +1638,134 @@ function renderAll() {
   renderDepth(VIEWS.depth);
 }
 
-/* ---------------- Live poll ---------------- */
-async function pollOnce() {
+/* ---------------- Live control status pill ---------------- */
+function setConnStatus(state, msg) {
+  if (state === true) state = "live";
+  else if (state === false || state == null) state = "offline";
+
+  const el = $("connStatus");
+  if (!el) return;
+
+  el.classList.remove("status-pill", "live", "stop", "connecting");
+  el.classList.add("status-pill");
+
+  const txt = el.querySelector(".txt");
+
+  if (state === "live") {
+    el.classList.add("live");
+    if (txt) txt.textContent = msg || "Live";
+  } else if (state === "connecting") {
+    el.classList.add("connecting");
+    if (txt) txt.textContent = msg || "Connecting…";
+  } else {
+    el.classList.add("stop");
+    if (txt) txt.textContent = msg || "Offline";
+  }
+}
+
+/* ---------------- Poll logic (NO OVERLAP) ---------------- */
+function resetPolling() {
+  const raw = $("refreshMs")?.value ?? "1000";
+  const v = parseInt(raw, 10);
+  POLL_MS = Math.max(250, isNaN(v) ? 1000 : v);
+  logLine("POLL", `resetPolling cadence=${POLL_MS}ms`);
+}
+
+/** Right-anchor newest timestamp (ALL charts share the same timeline msArr) */
+function followRightIfAllowed() {
+  const { N } = buildTimelineIndex();
+  if (!N) return;
+  if (AUTO_FOLLOW) {
+    IDX.value = N - 1;
+    renderAll(true);
+  } else {
+    renderAll(false);
+  }
+}
+
+async function bootstrapFullOnce(symbol) {
+  const n = 2000;
+
+  try {
+    ingestPred("hft", await fetchPredLatest(symbol, "hft", n), symbol);
+  } catch (e) {
+    logLine("ERR", `HFT /pred/latest failed: ${e.message}${e.bodyHint ? " · " + e.bodyHint : ""}`);
+  }
+
+  try {
+    ingestPred("idt", await fetchPredLatest(symbol, "idt", n), symbol);
+  } catch (e) {
+    logLine("ERR", `IDT /pred/latest failed: ${e.message}${e.bodyHint ? " · " + e.bodyHint : ""}`);
+  }
+
+  try {
+    const seconds = Number($("snapSeconds")?.value || "120") || 120;
+    ingestSnapshot(await fetchSnapshot(symbol, seconds));
+  } catch (e) {
+    logLine("ERR", `/snapshot failed: ${e.message}${e.bodyHint ? " · " + e.bodyHint : ""}`);
+  }
+
+  followRightIfAllowed();
+}
+
+async function pollOnceDelta() {
+  const symbol = getSymbol();
+
+  // clamp “since” so we never query the future
+  const sinceH = clampSince("hft", LAST.hft_ms);
+  const sinceI = clampSince("idt", LAST.idt_ms);
+  const sinceP = clampSince("price", LAST.price_ms);
+
+  const before = { hft_ms: LAST.hft_ms, idt_ms: LAST.idt_ms, price_ms: LAST.price_ms };
+
+  logLine("POLL", `delta poll: sym=${symbol} since(hft,idt,px)=${sinceH},${sinceI},${sinceP}`);
+  setConnStatus("connecting", "Connecting…");
+
+  let ok = false;
+  let addedAny = false;
+
+  try {
+    const d = await fetchPredDelta(symbol, "hft", sinceH);
+    const added = ingestPredDelta("hft", d, symbol);
+    if (added) addedAny = true;
+    ok = true;
+  } catch (e) {
+    logLine("ERR", `HFT /pred/delta failed: ${e.message}${e.bodyHint ? " · " + e.bodyHint : ""}`);
+  }
+
+  try {
+    const d = await fetchPredDelta(symbol, "idt", sinceI);
+    const added = ingestPredDelta("idt", d, symbol);
+    if (added) addedAny = true;
+    ok = true;
+  } catch (e) {
+    logLine("ERR", `IDT /pred/delta failed: ${e.message}${e.bodyHint ? " · " + e.bodyHint : ""}`);
+  }
+
+  try {
+    const d = await fetchSnapshotDelta(symbol, sinceP);
+    const added = ingestSnapshotDelta(d);
+    if (added) addedAny = true;
+    ok = true;
+  } catch (e) {
+    logLine("ERR", `/snapshot/delta failed: ${e.message}${e.bodyHint ? " · " + e.bodyHint : ""}`);
+  }
+
+  setConnStatus(ok ? "live" : "offline", ok ? "Live" : "Offline");
+
+  const after = { hft_ms: LAST.hft_ms, idt_ms: LAST.idt_ms, price_ms: LAST.price_ms };
+  logLine(
+    "POLL",
+    `cursor: BEFORE(hft,idt,px)=${before.hft_ms},${before.idt_ms},${before.price_ms}  AFTER=${after.hft_ms},${after.idt_ms},${after.price_ms}`
+  );
+
+  if (addedAny) followRightIfAllowed();
+}
+
+async function pollOnceFull() {
   const symbol = getSymbol();
   const n = 2000;
-  logLine("POLL", `pollOnce: sym=${symbol}`);
+  logLine("POLL", `full pollOnce: sym=${symbol}`);
 
   setConnStatus("connecting", "Connecting…");
   let ok = false;
@@ -1569,72 +1793,54 @@ async function pollOnce() {
   }
 
   setConnStatus(ok ? "live" : "offline", ok ? "Live" : "Offline");
-
-  const { N } = buildTimelineIndex();
-  if (N > 0) {
-    IDX.value = N - 1;
-    ensureViewsInitialized();
-  }
-  renderAll();
+  followRightIfAllowed();
 }
 
-/* ---------------- Live control ---------------- */
-function setConnStatus(state, msg) {
-  if (state === true) state = "live";
-  else if (state === false || state == null) state = "offline";
+/* Self-scheduled poll loop: NO OVERLAP EVER */
+async function pollLoop() {
+  if (!liveTimer) return;
+  if (pullInFlight) return;
 
-  const el = $("connStatus");
-  if (!el) return;
-
-  el.classList.remove("status-pill", "live", "stop", "connecting");
-  el.classList.add("status-pill");
-
-  const txt = el.querySelector(".txt");
-
-  if (state === "live") {
-    el.classList.add("live");
-    if (txt) txt.textContent = msg || "Live";
-  } else if (state === "connecting") {
-    el.classList.add("connecting");
-    if (txt) txt.textContent = msg || "Connecting…";
-  } else {
-    el.classList.add("stop");
-    if (txt) txt.textContent = msg || "Offline";
+  pullInFlight = true;
+  try {
+    if (USE_DELTA) await pollOnceDelta();
+    else await pollOnceFull();
+  } catch (e) {
+    logLine("ERR", e.message);
+  } finally {
+    pullInFlight = false;
+    if (liveTimer) liveTimer = setTimeout(pollLoop, POLL_MS);
   }
 }
 
-function resetPolling() {
-  const raw = $("refreshMs")?.value ?? "1000";
-  const v = parseInt(raw, 10);
-  POLL_MS = Math.max(250, isNaN(v) ? 1000 : v);
-  logLine("POLL", `resetPolling cadence=${POLL_MS}ms`);
-
-  if (liveTimer) {
-    clearInterval(liveTimer);
-    liveTimer = setInterval(() => pollOnce().catch((e) => logLine("ERR", e.message)), POLL_MS);
-    logLine("POLL", "interval restarted");
-  }
-}
-
+/* ---------------- Live start/stop ---------------- */
 function startLive() {
   if (liveTimer) return;
   stopPlayback();
+
+  AUTO_FOLLOW = true;
   resetPolling();
   setConnStatus("live");
 
   $("connectLive") && ($("connectLive").disabled = true);
   $("stopLive") && ($("stopLive").disabled = false);
 
-  logLine("LIVE", "start -> immediate poll");
-  pollOnce().catch((e) => logLine("ERR", e.message));
+  pullInFlight = false;
+  liveTimer = setTimeout(() => {}, 0);
 
-  liveTimer = setInterval(() => pollOnce().catch((e) => logLine("ERR", e.message)), POLL_MS);
-  logLine("LIVE", "interval started");
+  const symbol = getSymbol();
+  logLine("LIVE", `start (USE_DELTA=${USE_DELTA}) -> bootstrap then loop`);
+  bootstrapFullOnce(symbol).finally(() => {
+    if (!liveTimer) return;
+    liveTimer = setTimeout(pollLoop, 0);
+  });
 }
 
 function stopLive() {
-  if (liveTimer) clearInterval(liveTimer);
+  if (liveTimer) clearTimeout(liveTimer);
   liveTimer = null;
+  pullInFlight = false;
+
   setConnStatus(false);
 
   $("stopLive") && ($("stopLive").disabled = true);
@@ -1656,13 +1862,11 @@ function attachCanvasViewInteractions(canvasId, view, redraw, padL = 56, padR = 
       view.hoverIdx = -1;
       return;
     }
-    ensureViewsInitialized();
 
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const W = canvas.clientWidth || 1;
-    const x0 = padL,
-      x1 = W - padR;
+    const x0 = padL, x1 = W - padR;
 
     const frac = (x - x0) / Math.max(1, x1 - x0);
     const clamped = Math.max(0, Math.min(1, frac));
@@ -1673,6 +1877,7 @@ function attachCanvasViewInteractions(canvasId, view, redraw, padL = 56, padR = 
   canvas.addEventListener(
     "wheel",
     (e) => {
+      AUTO_FOLLOW = false;
       const now = performance.now();
       if (now - lastWheelAt < 10) return;
       lastWheelAt = now;
@@ -1686,8 +1891,7 @@ function attachCanvasViewInteractions(canvasId, view, redraw, padL = 56, padR = 
       const rect = canvas.getBoundingClientRect();
       const mouseX = e.clientX - rect.left;
 
-      const x0 = padL,
-        x1 = canvas.clientWidth - padR;
+      const x0 = padL, x1 = canvas.clientWidth - padR;
       const frac = (mouseX - x0) / Math.max(1, x1 - x0);
       const focusIdx = Math.round(view.i0 + frac * (view.i1 - view.i0));
 
@@ -1713,6 +1917,7 @@ function attachCanvasViewInteractions(canvasId, view, redraw, padL = 56, padR = 
   );
 
   canvas.addEventListener("pointerdown", (e) => {
+    AUTO_FOLLOW = false;
     const { N } = buildTimelineIndex();
     if (!N) return;
     ensureViewsInitialized();
@@ -1788,11 +1993,29 @@ function setMode(mode) {
   }
 }
 
+function hardResetForNewSymbol() {
+  stopLive();
+
+  STORE.hft = { rows: [], horizons: [], unit: "", byMs: new Map() };
+  STORE.idt = { rows: [], horizons: [], unit: "", byMs: new Map() };
+  STORE.price = { rows: [], byMs: new Map() };
+
+  LAST.hft_ms = 0;
+  LAST.idt_ms = 0;
+  LAST.price_ms = 0;
+
+  IDX.value = 0;
+  for (const k of Object.keys(VIEWS)) VIEWS[k] = makeView();
+
+  AUTO_FOLLOW = true;
+  renderAll(true);
+  startLive();
+}
+
 /* ---------------- Controls wiring ---------------- */
 (function controls() {
   logLine("INIT", "controls() begin");
 
-  // Cloudflare-aware default
   if ($("liveBase") && !$("liveBase").value) {
     const isLocal =
       location.hostname === "localhost" ||
@@ -1803,7 +2026,7 @@ function setMode(mode) {
 
   if ($("liveDate") && !$("liveDate").value) {
     $("liveDate").value = TODAY_YMD();
-    logLine("INIT", `liveDate defaulted to ${$("liveDate").value}`);
+    logLine("INIT", `liveDate defaulted to ${$("liveDate").value} (UTC)`);
   }
   $("liveDate")?.addEventListener("input", (e) => {
     e.target.value = e.target.value.replace(/[^\d]/g, "").slice(0, 8);
@@ -1814,35 +2037,43 @@ function setMode(mode) {
     setMode(mode);
   });
 
-  $("applyRefresh")?.addEventListener("click", () => resetPolling());
+  $("applyRefresh")?.addEventListener("click", () => {
+    resetPolling();
+    if (liveTimer) {
+      clearTimeout(liveTimer);
+      liveTimer = setTimeout(pollLoop, 0);
+      logLine("POLL", "loop rescheduled with new cadence");
+    }
+  });
+
   $("connectLive")?.addEventListener("click", () => {
     resetPolling();
     startLive();
   });
+
   $("stopLive")?.addEventListener("click", () => stopLive());
 
   $("timeSlider")?.addEventListener("input", () => {
+    AUTO_FOLLOW = false;
     IDX.value = +$("timeSlider").value;
-    renderAll();
+    renderAll(false);
   });
 
   $("playBtn")?.addEventListener("click", () => togglePlayback());
 
-  $("showHFT")?.addEventListener("change", renderAll);
-  $("showIDT")?.addEventListener("change", renderAll);
+  $("showHFT")?.addEventListener("change", () => renderAll(false));
+  $("showIDT")?.addEventListener("change", () => renderAll(false));
 
   $("liveSymbol")?.addEventListener("change", () => {
     $("pillSym") && ($("pillSym").textContent = getSymbol());
-    renderAll();
+    hardResetForNewSymbol();
   });
 
-  // Canvas interactions (+ hover)
   attachCanvasViewInteractions("qPrice", VIEWS.price, () => renderPrice(VIEWS.price), 56, 12);
   attachCanvasViewInteractions("qPred", VIEWS.pred, () => renderPred(VIEWS.pred), 56, 12);
   attachCanvasViewInteractions("qMicro", VIEWS.micro, () => renderMicro(VIEWS.micro), 56, 12);
   attachCanvasViewInteractions("qDepth", VIEWS.depth, () => renderDepth(VIEWS.depth), 56, 56, false);
 
-  // Pred modal wiring
   $("predCfgBtn")?.addEventListener("click", () => openPredModal());
   $("predModal")?.addEventListener("click", (e) => {
     if (e.target && e.target.id === "predModal") closePredModal();
@@ -1855,13 +2086,13 @@ function setMode(mode) {
     ensureDefaultPredSelection();
     buildPredModalLists();
     updatePredHintText();
-    renderAll();
+    renderAll(false);
   });
 
   $("predModalApply")?.addEventListener("click", () => {
     readModalSelections();
     closePredModal();
-    renderAll();
+    renderAll(false);
   });
 
   document.addEventListener("keydown", (e) => {
@@ -1880,8 +2111,8 @@ function setMode(mode) {
 (function init() {
   logLine("INIT", "boot init() begin");
   setConnStatus("offline");
-  ensureViewsInitialized();
+  ensureViewsInitialized(true);
   setupSlider();
-  renderAll();
+  renderAll(true);
   logLine("INIT", "boot init() end");
 })();
