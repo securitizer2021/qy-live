@@ -1,19 +1,23 @@
 "use strict";
 
 /* ============================================================================
-   Quantum Yield — Live Dashboard JS (FULL REVISED)
-   Key guarantees in this revision:
-   ✅ ALL charts use the SAME unified timeline (msArr from union of price/hft/idt)
-   ✅ ALL timestamps displayed as UTC (from CSV / backend epoch) — no PST conversion
-   ✅ AUTO-FOLLOW: when new data arrives, all 4 charts snap to latest point (right edge)
-   ✅ Switching symbols resets stores + views so y-axes recompute correctly (fixes ES->ZN)
-   ✅ Delta polling cursors advance correctly using last row ms + payload max_epoch_ms
-   ✅ No-overlap polling loop
+   Quantum Yield — Live Dashboard JS (FULL REVISED, UTC-ANCHOR)
+   What changed vs your prior version:
+   ✅ ALL 4 charts use the SAME unified ms timeline (union of price + hft + idt)
+   ✅ Time labels are taken DIRECTLY from datasource epoch -> rendered in UTC (no Pacific conversion)
+   ✅ The “latest timestamp” is ALWAYS the right edge when AUTO_FOLLOW is true
+   ✅ Delta cursors (LAST.*_ms) are anchored to the LAST ROW timestamp (not a computed max key guess)
+   ✅ No-overlap polling preserved
    ============================================================================ */
 
 /* ---------------- DOM helpers ---------------- */
 const $ = (id) => document.getElementById(id);
 
+const API_BASE =
+  window.location.hostname === "localhost"
+    ? "http://localhost:5050"
+    : `${window.location.origin}`;
+    
 function logLine(tag, msg) {
   const t = new Date().toLocaleTimeString();
   const line = `[${t}] ${tag}: ${msg}`;
@@ -43,19 +47,11 @@ function fmtInt(x) {
 
 /* ---------------- URL / fetch ---------------- */
 function baseURL() {
+  // Always prefer the explicit constant (prod vs local)
+  // Optional override: if you later re-enable <input id="liveBase">.
   const input = $("liveBase")?.value?.trim();
-  if (!input) {
-    const isLocal =
-      location.hostname === "localhost" ||
-      location.hostname === "127.0.0.1" ||
-      location.hostname.endsWith(".local");
-    return isLocal ? "http://localhost:5050" : "https://api.quantumyield.ai";
-  }
-  let v = input.replace(/\/+$/, "");
-  if (location.protocol === "https:" && v.startsWith("http://")) {
-    v = "https://" + v.slice("http://".length);
-  }
-  return v;
+  if (input) return input.replace(/\/+$/, "");
+  return API_BASE.replace(/\/+$/, "");
 }
 
 async function fetchJSON(path, params = {}) {
@@ -88,7 +84,7 @@ async function fetchJSON(path, params = {}) {
 
 /* ---------------- Time helpers (UTC ONLY) ---------------- */
 /**
- * Normalize epoch to milliseconds; auto-detect unit by magnitude:
+ * Normalize epoch to milliseconds; auto-detect by magnitude:
  * seconds, milliseconds, microseconds, nanoseconds.
  */
 function epochMsFromAny(v) {
@@ -100,41 +96,34 @@ function epochMsFromAny(v) {
   return Math.round(x * 1000);              // s -> ms
 }
 
-function timeLabelFromMsUTC(ms) {
-  const d = new Date(ms);
-  // HH:MM:SS in UTC
-  const hh = String(d.getUTCHours()).padStart(2, "0");
-  const mm = String(d.getUTCMinutes()).padStart(2, "0");
-  const ss = String(d.getUTCSeconds()).padStart(2, "0");
-  return `${hh}:${mm}:${ss}`;
+/** UTC time label HH:MM:SS from ms */
+function timeLabelFromMs(ms) {
+  if (!Number.isFinite(ms)) return "";
+  return new Date(ms).toISOString().slice(11, 19); // UTC
 }
 
-function dateTimeLabelFromMsUTC(ms) {
-  const d = new Date(ms);
-  // YYYY-MM-DD HH:MM:SS.mmm UTC
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const dd = String(d.getUTCDate()).padStart(2, "0");
-  const hh = String(d.getUTCHours()).padStart(2, "0");
-  const mm = String(d.getUTCMinutes()).padStart(2, "0");
-  const ss = String(d.getUTCSeconds()).padStart(2, "0");
-  const ms3 = String(d.getUTCMilliseconds()).padStart(3, "0");
-  return `${y}-${m}-${dd} ${hh}:${mm}:${ss}.${ms3} UTC`;
+/** UTC date-time label YYYY-MM-DD HH:MM:SS from ms */
+function dateTimeLabelFromMs(ms) {
+  if (!Number.isFinite(ms)) return "—";
+  return new Date(ms).toISOString().replace("T", " ").replace("Z", "");
 }
 
-function utcYMD(d = new Date()) {
+/** Default date input as UTC YYYYMMDD (no local tz) */
+function ymdUTC(d = new Date()) {
   const y = d.getUTCFullYear();
   const m = String(d.getUTCMonth() + 1).padStart(2, "0");
   const dd = String(d.getUTCDate()).padStart(2, "0");
   return `${y}${m}${dd}`;
 }
+const TODAY_YMD = () => ymdUTC();
 
+/* ---------------- Inputs ---------------- */
 function getSymbol() {
   return ($("liveSymbol")?.value || "ES").toUpperCase();
 }
 function getLiveDate() {
   const v = ($("liveDate")?.value || "").trim().replace(/[^\d]/g, "").slice(0, 8);
-  return v || utcYMD();
+  return v || TODAY_YMD();
 }
 
 /* Tooltip semantics for imbalance */
@@ -166,7 +155,6 @@ let pullInFlight = false;
 
 /* Auto-follow newest tick while live until user interacts */
 let AUTO_FOLLOW = true;
-let LAST_GLOBAL_MS = 0;
 
 /* ---------------- Horizon selection state ---------------- */
 const HSEL = { hftSelected: [], idtSelected: [] };
@@ -357,7 +345,7 @@ function ensureBpsKeys(rows, horizons, unit) {
   return u || "";
 }
 
-/* ---------------- Helpers: last-ms per stream ---------------- */
+/* ---------------- Helpers: "truth" last-ms per stream ---------------- */
 function lastMsFromRows(rows) {
   if (!rows || !rows.length) return 0;
   const r = rows[rows.length - 1];
@@ -368,34 +356,6 @@ function lastMsFromRows(rows) {
 function currentKnownLastMs(profile) {
   if (profile === "price") return lastMsFromRows(STORE.price.rows);
   return lastMsFromRows(STORE[profile]?.rows || []);
-}
-
-function globalLastMs() {
-  return Math.max(
-    currentKnownLastMs("price") || 0,
-    currentKnownLastMs("hft") || 0,
-    currentKnownLastMs("idt") || 0
-  );
-}
-
-function autoFollowIfNewData(force = false) {
-  const newest = globalLastMs();
-  if (!Number.isFinite(newest) || newest <= 0) return false;
-
-  const advanced = newest > (LAST_GLOBAL_MS || 0);
-  if (advanced || force) LAST_GLOBAL_MS = newest;
-
-  if (AUTO_FOLLOW && (advanced || force)) {
-    const { N } = buildTimelineIndex();
-    if (N > 0) {
-      IDX.value = N - 1;
-      const s = $("timeSlider");
-      if (s) s.value = String(IDX.value);
-      renderAll(true); // snap all views to right edge
-      return true;
-    }
-  }
-  return false;
 }
 
 function clampSince(profile, since) {
@@ -465,21 +425,23 @@ function ingestPred(profile, payload, symbol) {
 
   rebuildByMs(profile);
 
+  // IMPORTANT: cursor follows LAST ROW timestamp
   const lastMs = lastMsFromRows(rows);
   if (lastMs > 0) LAST[`${profile}_ms`] = lastMs;
 
   $("pillSym") && ($("pillSym").textContent = symbol || "—");
   $("pillRows") &&
-    ($("pillRows").textContent = String(
-      Math.max(STORE.hft.rows.length, STORE.idt.rows.length, STORE.price.rows.length)
-    ));
+    ($("pillRows").textContent = String(Math.max(STORE.hft.rows.length, STORE.idt.rows.length, STORE.price.rows.length)));
   $("pillL12") && ($("pillL12").textContent = "L1");
 
   clampSelectedToAvailable(profile);
   ensureDefaultPredSelection();
   updatePredHintText();
 
-  logLine("SNAP", `pred(${profile}): rows=${rows.length}, horizons=[${horizons.join(", ")}], unit=${unit || "?"} (LAST.${profile}_ms=${LAST[`${profile}_ms`]})`);
+  logLine(
+    "SNAP",
+    `pred(${profile}): rows=${rows.length}, horizons=[${horizons.join(", ")}], unit=${unit || "?"} (LAST.${profile}_ms=${LAST[`${profile}_ms`]})`
+  );
 }
 
 /* Delta merge (used for /pred/delta) */
@@ -535,9 +497,7 @@ function ingestPredDelta(profile, payload, symbol) {
 
     $("pillSym") && ($("pillSym").textContent = symbol || "—");
     $("pillRows") &&
-      ($("pillRows").textContent = String(
-        Math.max(STORE.hft.rows.length, STORE.idt.rows.length, STORE.price.rows.length)
-      ));
+      ($("pillRows").textContent = String(Math.max(STORE.hft.rows.length, STORE.idt.rows.length, STORE.price.rows.length)));
     $("pillL12") && ($("pillL12").textContent = "L1");
 
     clampSelectedToAvailable(profile);
@@ -556,6 +516,7 @@ function ingestSnapshot(payload) {
   STORE.price.rows = rows;
   rebuildPriceByMs();
 
+  // IMPORTANT: cursor follows LAST ROW timestamp
   const lastMs = lastMsFromRows(rows);
   if (lastMs > 0) LAST.price_ms = lastMs;
 
@@ -631,7 +592,7 @@ async function fetchSnapshotDelta(symbol, since_ms) {
   return fetchJSON("/snapshot/delta", { symbol, since_ms: Math.max(0, Number(since_ms) || 0) });
 }
 
-/* ---------------- Unified timeline ---------------- */
+/* ---------------- Unified timeline (single source of truth for x-axis) ---------------- */
 function buildTimelineIndex() {
   const msSet = new Set();
   for (const ms of STORE.price.byMs.keys()) msSet.add(ms);
@@ -696,8 +657,8 @@ function updateTimeLabel() {
   const { N, msArr } = buildTimelineIndex();
   const idx = Math.max(0, Math.min(IDX.value, Math.max(0, N - 1)));
   const ms = msArr[idx];
-  const ts = Number.isFinite(ms) ? dateTimeLabelFromMsUTC(ms) : "—";
-  el.textContent = `t = ${N ? idx + 1 : 0} / ${N}  ·  ${ts}`;
+  const ts = Number.isFinite(ms) ? dateTimeLabelFromMs(ms) : "—";
+  el.textContent = `t = ${N ? idx + 1 : 0} / ${N}  ·  ${ts} UTC`;
 }
 
 function stopPlayback() {
@@ -709,7 +670,7 @@ function stopPlayback() {
 
 function startPlayback() {
   stopPlayback();
-  AUTO_FOLLOW = false; // user is controlling time
+  AUTO_FOLLOW = false;
   const speed = Number($("speedSel")?.value || "1") || 1;
   if ($("playBtn")) $("playBtn").textContent = "Pause";
 
@@ -744,8 +705,9 @@ function ensureViewsInitialized(forceRight = false) {
 
   const init = (view) => {
     const uninit = view.i1 <= view.i0 || view.i1 <= 0;
-    if (uninit || forceRight) snapViewToRight(view, N, DEFAULT_VIEW_SPAN);
-    else {
+    if (uninit || forceRight) {
+      snapViewToRight(view, N, DEFAULT_VIEW_SPAN);
+    } else {
       view.i0 = Math.max(0, Math.min(view.i0, N - 2));
       view.i1 = Math.max(view.i0 + 1, Math.min(view.i1, N - 1));
     }
@@ -838,7 +800,7 @@ function drawTicksY(ctx, pad, W, H, minV, maxV, fmtFn) {
   ctx.restore();
 }
 
-function drawTicksXTimeUTC(ctx, pad, W, H, msArr, i0, i1) {
+function drawTicksXTime(ctx, pad, W, H, msArr, i0, i1) {
   const LAB = "rgba(159,182,212,0.9)";
   ctx.save();
   ctx.fillStyle = LAB;
@@ -851,7 +813,7 @@ function drawTicksXTimeUTC(ctx, pad, W, H, msArr, i0, i1) {
   for (let i = i0; i <= i1; i += step) {
     const x = x0 + ((i - i0) / Math.max(1, i1 - i0)) * (x1 - x0);
     const ms = msArr[i];
-    const lab = Number.isFinite(ms) ? timeLabelFromMsUTC(ms) : "";
+    const lab = Number.isFinite(ms) ? timeLabelFromMs(ms) : "";
     ctx.fillText(lab, x, y);
   }
   ctx.restore();
@@ -1013,13 +975,12 @@ function renderPrice(view) {
     micros[k] = Number.isFinite(mp) ? mp : lastMp;
   }
 
-  // ✅ recompute y-domain from CURRENT symbol data only (fixes ES->ZN y-axis bug)
   let min = +Infinity, max = -Infinity;
   for (const v of mids) if (Number.isFinite(v)) (min = Math.min(min, v), (max = Math.max(max, v)));
   const hasMicro = micros.some(Number.isFinite);
   if (hasMicro) for (const v of micros) if (Number.isFinite(v)) (min = Math.min(min, v), (max = Math.max(max, v)));
 
-  if (!Number.isFinite(min) || !Number.isFinite(max) || min === max) {
+  if (!Number.isFinite(min) || min === max) {
     min = 0; max = 1;
   }
 
@@ -1039,7 +1000,7 @@ function renderPrice(view) {
   }
 
   drawTicksY(ctx, pad, W, H, min, max, (v) => (Math.abs(v) >= 1000 ? fmtInt(v) : fmtNum(v, 2)));
-  drawTicksXTimeUTC(ctx, pad, W, H, msArr, i0, i1);
+  drawTicksXTime(ctx, pad, W, H, msArr, i0, i1);
 
   const strokeMid = "rgba(159,197,255,0.95)";
   const strokeMp = "rgba(52,211,153,0.95)";
@@ -1143,12 +1104,12 @@ function renderPred(view) {
       max = Math.max(max, v);
     }
   }
-  if (!Number.isFinite(min) || !Number.isFinite(max) || min === max) {
+  if (!Number.isFinite(min) || min === max) {
     min = -1; max = 1;
   }
 
   drawTicksY(ctx, pad, W, H, min, max, (v) => fmtNum(v, 2));
-  drawTicksXTimeUTC(ctx, pad, W, H, msArr, i0, i1);
+  drawTicksXTime(ctx, pad, W, H, msArr, i0, i1);
 
   const x0 = pad.l, x1 = W - pad.r;
   const y0 = pad.t, y1 = H - pad.b;
@@ -1221,12 +1182,12 @@ function renderMicro(view) {
 
   let min = +Infinity, max = -Infinity;
   for (const v of vals) if (Number.isFinite(v)) (min = Math.min(min, v), (max = Math.max(max, v)));
-  if (!Number.isFinite(min) || !Number.isFinite(max) || min === max) {
+  if (!Number.isFinite(min) || min === max) {
     min = -0.01; max = 0.01;
   }
 
   drawTicksY(ctx, pad, W, H, min, max, (v) => fmtNum(v, 6));
-  drawTicksXTimeUTC(ctx, pad, W, H, msArr, i0, i1);
+  drawTicksXTime(ctx, pad, W, H, msArr, i0, i1);
 
   const x0 = pad.l, x1 = W - pad.r;
   const y0 = pad.t, y1 = H - pad.b;
@@ -1252,7 +1213,7 @@ function renderMicro(view) {
 }
 
 /* ===================== Q4: Snapshot + Microstructure ===================== */
-/* --- bar helpers + renderDepth identical to your earlier version except UTC label --- */
+/* --- bar helpers + depth chart (same logic, but time labels are UTC) --- */
 
 function drawMiniBar(ctx, x, y, w, h, label, val, vmin, vmax, posCol, negCol, labelBelowGap = 6) {
   ctx.save();
@@ -1388,7 +1349,7 @@ function drawRightAxisTicks(ctx, xAxis, y0, y1, minV, maxV, fmtFn, title) {
   ctx.restore();
 }
 
-function drawBottomTimeTicksUTC(ctx, x0, x1, y, msArr, i0, i1) {
+function drawBottomTimeTicks(ctx, x0, x1, y, msArr, i0, i1) {
   ctx.save();
   ctx.fillStyle = "rgba(159,182,212,0.9)";
   ctx.font = "11px ui-monospace, Menlo, Consolas, monospace";
@@ -1399,7 +1360,7 @@ function drawBottomTimeTicksUTC(ctx, x0, x1, y, msArr, i0, i1) {
     const frac = (i - i0) / Math.max(1, i1 - i0);
     const x = x0 + frac * (x1 - x0);
     const ms = msArr[i];
-    const lab = Number.isFinite(ms) ? timeLabelFromMsUTC(ms) : "";
+    const lab = Number.isFinite(ms) ? timeLabelFromMs(ms) : "";
     ctx.fillText(lab, x, y);
   }
   ctx.restore();
@@ -1450,26 +1411,15 @@ function renderDepth(view) {
 
   function spreadFromRow(r) {
     const { b, a } = getBidAskPxAny(r);
-    if (Number.isFinite(b) && Number.isFinite(a)) return a - b;
-    const mid = midFromRow(r);
-    const mp = microFromRow(r);
-    if (Number.isFinite(mid) && Number.isFinite(mp)) return 2 * Math.abs(mp - mid);
+    // Only accept real spread when bid/ask are valid
+    if (Number.isFinite(b) && Number.isFinite(a) && a > b) return a - b;
     return NaN;
   }
 
   function imbalanceFromRow(r) {
     const { bs, as } = getBidAskSzAny(r);
-    const d = bs + as || 0;
-    if (d > 0) return (bs - as) / d;
-
-    const mid = midFromRow(r);
-    const mp = microFromRow(r);
-    const sp = spreadFromRow(r);
-    const eps = 1e-9;
-    if (Number.isFinite(mid) && Number.isFinite(mp) && Number.isFinite(sp) && sp > eps) {
-      const z = (mp - mid) / sp;
-      return Math.max(-1, Math.min(1, z));
-    }
+    const d = bs + as;
+    if (Number.isFinite(bs) && Number.isFinite(as) && d > 0) return (bs - as) / d;
     return NaN;
   }
 
@@ -1511,9 +1461,9 @@ function renderDepth(view) {
   y += TEXT_LINE;
 
   const msSnap = epochMsFromAny(r?.epoch_ns ?? r?.epoch_ms ?? r?.epoch_us ?? r?.epoch_s ?? r?.epoch) || msArr[idx];
-  const tsSnap = Number.isFinite(msSnap) ? dateTimeLabelFromMsUTC(msSnap) : "—";
+  const tsSnap = Number.isFinite(msSnap) ? dateTimeLabelFromMs(msSnap) : "—";
   ctx.fillStyle = "rgba(159,182,212,0.8)";
-  ctx.fillText(tsSnap, 12, y);
+  ctx.fillText(`${tsSnap} UTC`, 12, y);
   y += TEXT_LINE;
 
   const { b: bpx, a: apx } = getBidAskPxAny(r);
@@ -1565,14 +1515,14 @@ function renderDepth(view) {
   const chartTop = BAR_Y0 + ROW_H * 2 + GAP_BEFORE_CHART;
   const chartBottom = H - 28;
 
-  const pad2 = { l: 56, r: 56, t: chartTop, b: 28 };
-  const x0 = pad2.l;
-  const x1 = W - pad2.r;
-  const y0 = pad2.t;
+  const pad = { l: 56, r: 56, t: chartTop, b: 28 };
+  const x0 = pad.l;
+  const x1 = W - pad.r;
+  const y0 = pad.t;
   const y1 = chartBottom;
 
-  drawGrid(ctx, W, H, pad2, 6, 4);
-  drawAxes(ctx, W, H, pad2);
+  drawGrid(ctx, W, H, pad, 6, 4);
+  drawAxes(ctx, W, H, pad);
 
   const span = Math.max(1, i1 - i0);
   const xs = new Array(span + 1);
@@ -1617,7 +1567,7 @@ function renderDepth(view) {
 
   drawLeftAxisTicks(ctx, x0, y0, y1, sMin, sMax, (v) => fmtNum(v, 4), "Spread");
   drawRightAxisTicks(ctx, x1, y0, y1, iMin, iMax, (v) => fmtNum(v, 2), "Imbalance");
-  drawBottomTimeTicksUTC(ctx, x0, x1, y1 + 6, msArr, i0, i1);
+  drawBottomTimeTicks(ctx, x0, x1, y1 + 6, msArr, i0, i1);
 
   const spreadCol = "rgba(245,158,11,0.95)";
   const imbPosCol = "rgba(52,211,153,0.95)";
@@ -1634,8 +1584,8 @@ function renderDepth(view) {
       { label: "imbalance (≥0)", strokeStyle: imbPosCol, dash: [6, 4] },
       { label: "imbalance (<0)", strokeStyle: imbNegCol, dash: [6, 4] },
     ],
-    pad2.l + 8,
-    pad2.t + 4
+    pad.l + 8,
+    pad.t + 4
   );
 
   const hoverIdx = view.hoverIdx;
@@ -1643,7 +1593,7 @@ function renderDepth(view) {
   if (hoverK >= 0) {
     drawHover(
       ctx,
-      pad2,
+      pad,
       W,
       H,
       xs,
@@ -1707,14 +1657,32 @@ function resetPolling() {
   logLine("POLL", `resetPolling cadence=${POLL_MS}ms`);
 }
 
+/** Right-anchor newest timestamp (ALL charts share the same timeline msArr) */
+function followRightIfAllowed() {
+  const { N } = buildTimelineIndex();
+  if (!N) return;
+  if (AUTO_FOLLOW) {
+    IDX.value = N - 1;
+    renderAll(true);
+  } else {
+    renderAll(false);
+  }
+}
+
 async function bootstrapFullOnce(symbol) {
   const n = 2000;
 
-  try { ingestPred("hft", await fetchPredLatest(symbol, "hft", n), symbol); }
-  catch (e) { logLine("ERR", `HFT /pred/latest failed: ${e.message}${e.bodyHint ? " · " + e.bodyHint : ""}`); }
+  try {
+    ingestPred("hft", await fetchPredLatest(symbol, "hft", n), symbol);
+  } catch (e) {
+    logLine("ERR", `HFT /pred/latest failed: ${e.message}${e.bodyHint ? " · " + e.bodyHint : ""}`);
+  }
 
-  try { ingestPred("idt", await fetchPredLatest(symbol, "idt", n), symbol); }
-  catch (e) { logLine("ERR", `IDT /pred/latest failed: ${e.message}${e.bodyHint ? " · " + e.bodyHint : ""}`); }
+  try {
+    ingestPred("idt", await fetchPredLatest(symbol, "idt", n), symbol);
+  } catch (e) {
+    logLine("ERR", `IDT /pred/latest failed: ${e.message}${e.bodyHint ? " · " + e.bodyHint : ""}`);
+  }
 
   try {
     const seconds = Number($("snapSeconds")?.value || "120") || 120;
@@ -1723,35 +1691,61 @@ async function bootstrapFullOnce(symbol) {
     logLine("ERR", `/snapshot failed: ${e.message}${e.bodyHint ? " · " + e.bodyHint : ""}`);
   }
 
-  // ✅ snap all charts to newest immediately
-  autoFollowIfNewData(true);
+  followRightIfAllowed();
 }
 
 async function pollOnceDelta() {
   const symbol = getSymbol();
 
+  // clamp “since” so we never query the future
   const sinceH = clampSince("hft", LAST.hft_ms);
   const sinceI = clampSince("idt", LAST.idt_ms);
   const sinceP = clampSince("price", LAST.price_ms);
+
+  const before = { hft_ms: LAST.hft_ms, idt_ms: LAST.idt_ms, price_ms: LAST.price_ms };
 
   logLine("POLL", `delta poll: sym=${symbol} since(hft,idt,px)=${sinceH},${sinceI},${sinceP}`);
   setConnStatus("connecting", "Connecting…");
 
   let ok = false;
+  let addedAny = false;
 
-  try { ingestPredDelta("hft", await fetchPredDelta(symbol, "hft", sinceH), symbol); ok = true; }
-  catch (e) { logLine("ERR", `HFT /pred/delta failed: ${e.message}${e.bodyHint ? " · " + e.bodyHint : ""}`); }
+  try {
+    const d = await fetchPredDelta(symbol, "hft", sinceH);
+    const added = ingestPredDelta("hft", d, symbol);
+    if (added) addedAny = true;
+    ok = true;
+  } catch (e) {
+    logLine("ERR", `HFT /pred/delta failed: ${e.message}${e.bodyHint ? " · " + e.bodyHint : ""}`);
+  }
 
-  try { ingestPredDelta("idt", await fetchPredDelta(symbol, "idt", sinceI), symbol); ok = true; }
-  catch (e) { logLine("ERR", `IDT /pred/delta failed: ${e.message}${e.bodyHint ? " · " + e.bodyHint : ""}`); }
+  try {
+    const d = await fetchPredDelta(symbol, "idt", sinceI);
+    const added = ingestPredDelta("idt", d, symbol);
+    if (added) addedAny = true;
+    ok = true;
+  } catch (e) {
+    logLine("ERR", `IDT /pred/delta failed: ${e.message}${e.bodyHint ? " · " + e.bodyHint : ""}`);
+  }
 
-  try { ingestSnapshotDelta(await fetchSnapshotDelta(symbol, sinceP)); ok = true; }
-  catch (e) { logLine("ERR", `/snapshot/delta failed: ${e.message}${e.bodyHint ? " · " + e.bodyHint : ""}`); }
+  try {
+    const d = await fetchSnapshotDelta(symbol, sinceP);
+    const added = ingestSnapshotDelta(d);
+    if (added) addedAny = true;
+    ok = true;
+  } catch (e) {
+    logLine("ERR", `/snapshot/delta failed: ${e.message}${e.bodyHint ? " · " + e.bodyHint : ""}`);
+  }
 
   setConnStatus(ok ? "live" : "offline", ok ? "Live" : "Offline");
 
-  // ✅ auto-follow whenever newest timestamp advances (even if row count unchanged)
-  autoFollowIfNewData(false);
+  const after = { hft_ms: LAST.hft_ms, idt_ms: LAST.idt_ms, price_ms: LAST.price_ms };
+  logLine(
+    "POLL",
+    `cursor: BEFORE(hft,idt,px)=${before.hft_ms},${before.idt_ms},${before.price_ms}  AFTER=${after.hft_ms},${after.idt_ms},${after.price_ms}`
+  );
+
+  if (addedAny) followRightIfAllowed();
 }
 
 async function pollOnceFull() {
@@ -1762,11 +1756,19 @@ async function pollOnceFull() {
   setConnStatus("connecting", "Connecting…");
   let ok = false;
 
-  try { ingestPred("hft", await fetchPredLatest(symbol, "hft", n), symbol); ok = true; }
-  catch (e) { logLine("ERR", `HFT /pred/latest failed: ${e.message}${e.bodyHint ? " · " + e.bodyHint : ""}`); }
+  try {
+    ingestPred("hft", await fetchPredLatest(symbol, "hft", n), symbol);
+    ok = true;
+  } catch (e) {
+    logLine("ERR", `HFT /pred/latest failed: ${e.message}${e.bodyHint ? " · " + e.bodyHint : ""}`);
+  }
 
-  try { ingestPred("idt", await fetchPredLatest(symbol, "idt", n), symbol); ok = true; }
-  catch (e) { logLine("ERR", `IDT /pred/latest failed: ${e.message}${e.bodyHint ? " · " + e.bodyHint : ""}`); }
+  try {
+    ingestPred("idt", await fetchPredLatest(symbol, "idt", n), symbol);
+    ok = true;
+  } catch (e) {
+    logLine("ERR", `IDT /pred/latest failed: ${e.message}${e.bodyHint ? " · " + e.bodyHint : ""}`);
+  }
 
   try {
     const seconds = Number($("snapSeconds")?.value || "120") || 120;
@@ -1777,7 +1779,7 @@ async function pollOnceFull() {
   }
 
   setConnStatus(ok ? "live" : "offline", ok ? "Live" : "Offline");
-  autoFollowIfNewData(false);
+  followRightIfAllowed();
 }
 
 /* Self-scheduled poll loop: NO OVERLAP EVER */
@@ -1833,7 +1835,7 @@ function stopLive() {
   logLine("LIVE", "stopped");
 }
 
-/* ---------------- Canvas interactions (zoom/pan/hover) ---------------- */
+/* ---------------- Canvas interactions (independent + hover) ---------------- */
 function attachCanvasViewInteractions(canvasId, view, redraw, padL = 56, padR = 12, invertWheel = false) {
   const canvas = $(canvasId);
   if (!canvas) return;
@@ -1937,7 +1939,9 @@ function attachCanvasViewInteractions(canvasId, view, redraw, padL = 56, padR = 
 
   canvas.addEventListener("pointerup", (e) => {
     view.dragging = false;
-    try { canvas.releasePointerCapture(e.pointerId); } catch {}
+    try {
+      canvas.releasePointerCapture(e.pointerId);
+    } catch {}
   });
 
   canvas.addEventListener("pointerleave", () => {
@@ -1952,7 +1956,7 @@ function attachCanvasViewInteractions(canvasId, view, redraw, padL = 56, padR = 
   });
 }
 
-/* ---------------- Mode wiring / symbol reset ---------------- */
+/* ---------------- Mode wiring ---------------- */
 function setMode(mode) {
   const live = mode === "live";
   $("liveHdr")?.classList.toggle("hide", !live);
@@ -1987,13 +1991,9 @@ function hardResetForNewSymbol() {
   LAST.price_ms = 0;
 
   IDX.value = 0;
-  LAST_GLOBAL_MS = 0;
-
   for (const k of Object.keys(VIEWS)) VIEWS[k] = makeView();
 
   AUTO_FOLLOW = true;
-
-  // render clean slate then reconnect
   renderAll(true);
   startLive();
 }
@@ -2011,7 +2011,7 @@ function hardResetForNewSymbol() {
   }
 
   if ($("liveDate") && !$("liveDate").value) {
-    $("liveDate").value = getLiveDate();
+    $("liveDate").value = TODAY_YMD();
     logLine("INIT", `liveDate defaulted to ${$("liveDate").value} (UTC)`);
   }
   $("liveDate")?.addEventListener("input", (e) => {
