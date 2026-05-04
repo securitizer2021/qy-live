@@ -16,7 +16,7 @@ const $ = (id) => document.getElementById(id);
 const API_BASE =
   window.location.hostname === "localhost"
     ? "http://localhost:5050"
-    : "https://api.quantumyield.ai";
+    : "https://live.quantumyield.ai";
     
 function logLine(tag, msg) {
   const t = new Date().toLocaleTimeString();
@@ -2007,7 +2007,7 @@ function hardResetForNewSymbol() {
       location.hostname === "localhost" ||
       location.hostname === "127.0.0.1" ||
       location.hostname.endsWith(".local");
-    $("liveBase").value = isLocal ? "http://localhost:5050" : "https://api.quantumyield.ai";
+    $("liveBase").value = isLocal ? "http://localhost:5050" : "https://live.quantumyield.ai";
   }
 
   if ($("liveDate") && !$("liveDate").value) {
