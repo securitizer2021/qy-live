@@ -16,7 +16,7 @@ const $ = (id) => document.getElementById(id);
 const API_BASE =
   window.location.hostname === "localhost"
     ? "http://localhost:5050"
-    : "https://live.quantumyield.ai";
+    : "https://api.quantumyield.ai";
     
 function logLine(tag, msg) {
   const t = new Date().toLocaleTimeString();
