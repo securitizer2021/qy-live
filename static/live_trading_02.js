@@ -582,14 +582,20 @@ async function fetchPredLatest(symbol, profile, n = 2000) {
 
 async function fetchSnapshot(symbol, seconds = 120) {
   const s = Math.max(1, Math.min(120, Number(seconds) || 120));
-  return fetchJSON("/snapshot", { symbol, seconds: s, profile: "hft" });
+  const profile = symbol.toUpperCase() === "NQ" ? "idt" : "hft";
+  return fetchJSON("/snapshot", { symbol, seconds: s, profile });
 }
 
 async function fetchPredDelta(symbol, profile, since_ms) {
   return fetchJSON("/pred/delta", { symbol, profile, since_ms: Math.max(0, Number(since_ms) || 0) });
 }
 async function fetchSnapshotDelta(symbol, since_ms) {
-  return fetchJSON("/snapshot/delta", { symbol, since_ms: Math.max(0, Number(since_ms) || 0) });
+  const profile = symbol.toUpperCase() === "NQ" ? "idt" : "hft";
+  return fetchJSON("/snapshot/delta", {
+    symbol,
+    profile,
+    since_ms: Math.max(0, Number(since_ms) || 0),
+  });
 }
 
 /* ---------------- Unified timeline (single source of truth for x-axis) ---------------- */
@@ -1616,7 +1622,40 @@ function renderAll(forceRight = false) {
   ensureViewsInitialized(forceRight);
   setupSlider();
   updateTimeLabel();
-  $("pillDate") && ($("pillDate").textContent = getLiveDate());
+
+  /* ---------------- derive replay/session date from actual parquet timestamps ---------------- */
+  (function updateSessionDateFromData() {
+
+    const candidates = [
+      currentKnownLastMs("price"),
+      currentKnownLastMs("hft"),
+      currentKnownLastMs("idt"),
+    ].filter(Number.isFinite).filter(v => v > 0);
+
+    if (!candidates.length) {
+      $("pillDate") && ($("pillDate").textContent = getLiveDate());
+      return;
+    }
+
+    const ms = Math.max(...candidates);
+
+    const d = new Date(ms);
+
+    const y =
+      d.getUTCFullYear().toString();
+
+    const m =
+      String(d.getUTCMonth() + 1).padStart(2, "0");
+
+    const dd =
+      String(d.getUTCDate()).padStart(2, "0");
+
+    const sessionDate = `${y}${m}${dd}`;
+
+    $("pillDate") &&
+      ($("pillDate").textContent = sessionDate);
+
+  })();
 
   renderPrice(VIEWS.price);
   renderPred(VIEWS.pred);
