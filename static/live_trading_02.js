@@ -4,7 +4,7 @@
    Quantum Yield — Live Dashboard JS (FULL REVISED, UTC-ANCHOR)
    What changed vs your prior version:
    ✅ ALL 4 charts use the SAME unified ms timeline (union of price + hft + idt)
-   ✅ Time labels are taken DIRECTLY from datasource epoch -> rendered in UTC (no Pacific conversion)
+   ✅ Time labels are taken DIRECTLY from datasource epoch -> rendered in Pacific time (automatic PST/PDT)
    ✅ The “latest timestamp” is ALWAYS the right edge when AUTO_FOLLOW is true
    ✅ Delta cursors (LAST.*_ms) are anchored to the LAST ROW timestamp (not a computed max key guess)
    ✅ No-overlap polling preserved
@@ -19,7 +19,7 @@ const API_BASE =
     : "https://api2.quantumyield.ai";
     
 function logLine(tag, msg) {
-  const t = new Date().toLocaleTimeString();
+  const t = new Intl.DateTimeFormat("en-US", {timeZone:"America/Los_Angeles",hour:"2-digit",minute:"2-digit",second:"2-digit",timeZoneName:"short"}).format(new Date());
   const line = `[${t}] ${tag}: ${msg}`;
   console.log(line);
 
@@ -82,7 +82,7 @@ async function fetchJSON(path, params = {}) {
   return res.json();
 }
 
-/* ---------------- Time helpers (UTC ONLY) ---------------- */
+/* ---------------- Time helpers (Pacific display; UTC data) ---------------- */
 /**
  * Normalize epoch to milliseconds; auto-detect by magnitude:
  * seconds, milliseconds, microseconds, nanoseconds.
@@ -96,16 +96,16 @@ function epochMsFromAny(v) {
   return Math.round(x * 1000);              // s -> ms
 }
 
-/** UTC time label HH:MM:SS from ms */
+/** Pacific time label HH:MM:SS from ms */
 function timeLabelFromMs(ms) {
   if (!Number.isFinite(ms)) return "";
-  return new Date(ms).toISOString().slice(11, 19); // UTC
+  return new Intl.DateTimeFormat("en-GB", {timeZone: "America/Los_Angeles", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23"}).format(new Date(ms));
 }
 
-/** UTC date-time label YYYY-MM-DD HH:MM:SS from ms */
+/** Pacific date-time label YYYY-MM-DD HH:MM:SS from ms */
 function dateTimeLabelFromMs(ms) {
   if (!Number.isFinite(ms)) return "—";
-  return new Date(ms).toISOString().replace("T", " ").replace("Z", "");
+  return new Intl.DateTimeFormat("en-CA", {timeZone: "America/Los_Angeles", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23", timeZoneName: "short"}).format(new Date(ms));
 }
 
 /** Default date input as UTC YYYYMMDD (no local tz) */
@@ -664,7 +664,7 @@ function updateTimeLabel() {
   const idx = Math.max(0, Math.min(IDX.value, Math.max(0, N - 1)));
   const ms = msArr[idx];
   const ts = Number.isFinite(ms) ? dateTimeLabelFromMs(ms) : "—";
-  el.textContent = `t = ${N ? idx + 1 : 0} / ${N}  ·  ${ts} UTC`;
+  el.textContent = `t = ${N ? idx + 1 : 0} / ${N}  ·  ${ts}`;
 }
 
 function stopPlayback() {
@@ -1219,7 +1219,7 @@ function renderMicro(view) {
 }
 
 /* ===================== Q4: Snapshot + Microstructure ===================== */
-/* --- bar helpers + depth chart (same logic, but time labels are UTC) --- */
+/* --- bar helpers + depth chart (same logic, but time labels are Pacific) --- */
 
 function drawMiniBar(ctx, x, y, w, h, label, val, vmin, vmax, posCol, negCol, labelBelowGap = 6) {
   ctx.save();
@@ -1469,7 +1469,7 @@ function renderDepth(view) {
   const msSnap = epochMsFromAny(r?.epoch_ns ?? r?.epoch_ms ?? r?.epoch_us ?? r?.epoch_s ?? r?.epoch) || msArr[idx];
   const tsSnap = Number.isFinite(msSnap) ? dateTimeLabelFromMs(msSnap) : "—";
   ctx.fillStyle = "rgba(159,182,212,0.8)";
-  ctx.fillText(`${tsSnap} UTC`, 12, y);
+  ctx.fillText(`${tsSnap}`, 12, y);
   y += TEXT_LINE;
 
   const { b: bpx, a: apx } = getBidAskPxAny(r);
